@@ -261,6 +261,51 @@ Three findings worth keeping:
    `?` refers to the *add-on trigger board* of 4.16; the four-in, four-out TTL port on the
    10-way K2 header is built in. So the out-of-scope idea of a TTL pulse on move
    completion needs no extra hardware on this controller.
+4. **All four `TTL_OUT` bits are host-drivable**, confirmed by writing `TTL,F` and reading
+   back all four bits as `1`. The hex-write form takes a single argument: `TTL,F` all
+   high, `TTL,0` all low, `TTL,6` a pattern.
+5. **The readback's hex case is not consistent between commands.** `TTL` answers
+   lowercase (`'f'`); `LMT` answers uppercase (`'0F'`). Same controller, same session.
+   Parse both case-insensitively — a literal `== "0F"` works for one and fails silently
+   for the other.
+
+### The joystick screen is a local model, and the link is one-way
+
+The PS3J100 plugs into RS232-1 or RS232-2 (manual 2.5.3), which makes it a **second serial
+master issuing commands to the controller**, not a peripheral the controller polls. Tested
+by driving the TTL outputs from the host while an operator watched the joystick's screen:
+
+| Path | Works |
+|---|---|
+| Joystick button → controller register | **yes** — 12 clean transitions, `'6'` ↔ `'4'` |
+| Host `TTL,…` → controller register | **yes** — 24 edges at 1.5 Hz, every write read back |
+| Controller register → joystick screen | **no** — frozen through all 24 edges *and* a deliberate one-second all-four-high hold, which rules out slow refresh |
+
+The screen updates when its own button is pressed, and never when the host writes. So it
+displays what the joystick believes it last set.
+
+**The consequence is a demonstrated disagreement.** During the 1.5 Hz run the screen
+reported TTL2 low while the register genuinely held that bit high. Both were "correct"
+about different things. So:
+
+- **The joystick screen is not a diagnostic** for TTL state whenever a host program is
+  also driving those lines. Read `TTL` / `TTL,n,?` instead.
+- **There is no arbitration: last writer wins.** A host write silently overrides a
+  joystick-asserted output, and the joystick has no way to notice. Where a `TTL_OUT` line
+  gates a camera, a shutter or a laser, either source can override the other.
+- The button keeps working afterwards — host writes do not lock the joystick out.
+
+This is the same hazard as the untested-concurrency gap in `docs/development-status.md`,
+arriving from an unexpected direction: not two software modules sharing a port, but a
+*physical device* issuing commands on the other serial port while a run is in progress.
+
+### Timing: use deadlines, not per-iteration sleeps
+
+Driving the outputs at a requested rate, `sleep(half_period)` each iteration achieved
+**1.76 Hz against 2.0 requested**, a 12 % shortfall, because each serial round trip on a
+9600-baud link adds to every half-cycle. Scheduling against absolute deadlines instead
+achieved **1.497 Hz against 1.5**, a 0.2 % error, on the same link with a write *and* a
+verification read per edge. Any timed sequence against this controller needs the latter.
 
 **Firmware 1.03 does not implement the software-limit query family at all.** All of
 `UNTLIMIT,?`, `CHKLIMITR`, `CHKLIMITA`, `ACTLIMITR,?` and `ACTLIMITA,?` — rows 5 to 9 of

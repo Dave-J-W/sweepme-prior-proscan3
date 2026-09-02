@@ -141,10 +141,21 @@ momentary. Full results, including that the menu's "TTL2" is really `TTL_OUT 1` 
 `TRIGGER = NONE` does not mean the TTL port is absent, are in `docs/command-map.md`,
 "Joystick buttons are observable, through the TTL port".
 
+Driving the TTL outputs from the host then showed that **the joystick screen is a local
+model and the link is one-way**: the register follows both the joystick's button and a
+host write, but the screen follows only the button, and was demonstrated reporting TTL2
+low while the register held that bit high. That makes the screen useless as a TTL
+diagnostic whenever a host is also writing, and it makes the joystick a second
+uncoordinated command source — see the concurrency note under "Known gaps" below.
+
 The scratchpad tooling for this: `hw_watch.py` polls `P`, `$`, `LMT`, `O`, `OF` at ~7 Hz
-and reports only changes; `hw_ttl_out.py` polls `TTL` and `LTTL` at ~18 Hz. Both print
-with `flush=True` — **do not pipe them through `sed` or `grep` when backgrounding them**,
-because both stages block-buffer and the log then stays invisible until the process exits.
+and reports only changes; `hw_ttl_out.py` polls `TTL` and `LTTL` at ~18 Hz;
+`hw_ttl_flicker2.py` drives the outputs at a requested rate. All print with `flush=True` —
+**do not pipe them through `sed` or `grep` when backgrounding them**, because both stages
+block-buffer and the log then stays invisible until the process exits. That cost two dead
+windows. `hw_ttl_flicker2.py` also schedules against absolute deadlines rather than
+sleeping a fixed half-period, which is the difference between 1.497 Hz and 1.76 Hz when
+1.5 and 2.0 were asked for.
 
 ## The next thing to do
 
@@ -249,6 +260,12 @@ Honest limits of the 229 checks:
   Real moves are seconds long, which is what `Move timeout in s` exists for.
 - **No concurrency test.** Two SweepMe! modules sharing one controller port is a
   supported SweepMe! pattern (`self.device_communication`) and is entirely untested here.
+  Worse, the hazard is not limited to software: a **PS3J100 joystick is a second serial
+  master** on RS232-1/-2 (manual 2.5.3), issuing commands while a run is in progress. It
+  was shown to contend for the TTL output register with no arbitration in either
+  direction — last writer wins, and the joystick's screen cannot see a host write, so it
+  goes stale and disagrees. See `docs/command-map.md`, "The joystick screen is a local
+  model, and the link is one-way". Nothing in this driver accounts for a second master.
 
 ## Repository history note
 
