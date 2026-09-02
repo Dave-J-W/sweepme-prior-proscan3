@@ -521,7 +521,7 @@ class ProScanIIISimulator:
         if self.active_move is not None or self.move_queue:
             self._error(2)  # NOT_IDLE
             return
-        for axis, argument in zip(axes, arguments, strict=False):
+        for axis, argument in zip(axes, arguments):
             try:
                 value = int(argument)
             except ValueError:
@@ -554,7 +554,7 @@ class ProScanIIISimulator:
         if len(arguments) < 2:
             self._error(4)
             return
-        for axis, argument in zip(("X", "Y", "Z"), arguments, strict=False):
+        for axis, argument in zip(("X", "Y", "Z"), arguments):
             try:
                 self._queue_move(axis, int(argument))
             except ValueError:
