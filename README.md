@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 183 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 188 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -126,7 +126,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 183/183
+python tests/test_proscan3_virtual.py     # expect 188/188
 ruff check src tests
 ```
 
@@ -144,7 +144,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 183 checks covering the translation sequence, all three axes,
+No hardware needed. 188 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,
@@ -199,7 +199,10 @@ Stated plainly, because none of these is settled by the manual:
 11. **`XD`/`YD` are assumed unreadable, not merely undocumented.** No command in 4.2–4.4
    reports them. If a future firmware adds a query form, the two empty keys in a saved
    configuration are where it belongs.
-12. **Untested on hardware.** Every check so far is against the simulator. Work through
+12. **No motion has been tested on hardware.** Communication, the read-only queries,
+   error decoding and the configuration capture have been run against a real ProScan
+   H31XYZ (firmware 1.03); everything that moves an axis is still simulator-only,
+   because that controller has no stage, focus or joystick fitted. Work through
    `docs/hardware-test-procedure.md` before trusting a data set.
 
 Not implemented, because the brief was one-dimensional translation: multi-axis `G`,

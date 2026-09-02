@@ -3,8 +3,30 @@
 Work through this in order the first time the driver meets a real controller. Steps 1–4
 move nothing. Stop at the first step that misbehaves.
 
+**Steps 1, 2 and 7a were completed on 2026-09-02** against a bare ProScan H31XYZ,
+firmware 1.03 — see `docs/development-status.md`, "What the bench controller settled",
+for the results and `docs/command-map.md` for the response formats it confirmed.
+
+**On a controller with nothing plugged into it**, `?` reports `STAGE = NONE` and
+`FOCUS = NONE`, and then:
+
+- `RES`, `SS`, `SSZ` and `UPR,Z` all answer `0`, so `configure()` raises a `ValueError`
+  about a non-positive resolution on every axis. That is correct behaviour, not a fault,
+  but it means **steps 3 to 6 and step 9 cannot be reached** without a stage or focus
+  axis fitted.
+- `LMT` answers `0F`, i.e. all four X/Y limit switches read as active. Any move attempt
+  will look like a limit hit.
+- Firmware 1.03 rejects `UNTLIMIT,?`, `CHKLIMITR`, `CHKLIMITA`, `ACTLIMITR,?` and
+  `ACTLIMITA,?` with `COMMAND_NOT_FOUND (E,5)`, so the software-limit checks below have
+  nothing to read. This is firmware, not the missing stage.
+
 Run everything from `pysweepme` so a failure is a Python traceback rather than a GUI
-message:
+message. Note that `message_box` outside SweepMe! may try to raise a real dialog and
+block the script, so replace it first:
+
+```python
+stage.message_box = lambda msg, blocking=False: print(msg)
+```
 
 ```python
 import pysweepme
@@ -131,10 +153,11 @@ Open the file and check it against the controller's own front panel or Prior Ter
 | `stage.move_x_direction`, `move_y_direction` | **empty** — the manual gives no way to read `XD`/`YD` |
 | `reference.stage_joystick_speed` | may be 50 % or 25 % of the real setting if a joystick hot key has been pressed; this is the documented behaviour of `O`, not a bug |
 
-Then confirm nothing was written to the controller: `stage.port.log` (or a serial monitor)
-must contain only bare queries — no command in the capture should have a value after a
-comma, other than the axis selectors `RES,S`, `RES,Z`, `UPR,Z`, `CURRENT,1..3`,
-`UNTLIMIT,?`, `ACTLIMITR,?` and `ACTLIMITA,?`.
+Then confirm nothing was written to the controller. A real `pysweepme` port has **no**
+`.log` attribute — only the test bench's fake port does — so use a serial monitor, or wrap
+`stage._write` to record what goes past. It must contain only bare queries: no command in
+the capture should have a value after a comma, other than the axis selectors `RES,S`,
+`RES,Z`, `UPR,Z`, `CURRENT,1..3`, `UNTLIMIT,?`, `ACTLIMITR,?` and `ACTLIMITA,?`.
 
 Now apply it. Change the speed on the controller by hand first, so the restore is visible:
 

@@ -6,7 +6,11 @@ feature).
 
 ## Where the work stands
 
-Implemented and verified against the simulator; **never yet run against a controller**.
+Implemented and verified against the simulator. **Communication, every read-only query,
+error decoding and the configuration capture have now been run against a real
+controller**; nothing that moves an axis has, because the controller available has no
+stage, focus or joystick fitted. See "What the bench controller settled" below for what
+that does and does not license.
 
 | Capability | State |
 |---|---|
@@ -25,8 +29,10 @@ Implemented and verified against the simulator; **never yet run against a contro
 | Read-only status diagnostic | done |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **183/183**, exit 0, across 30 sections.
-`ruff check src tests` clean.
+`python tests/test_proscan3_virtual.py` → **188/188**, exit 0, across 30 sections.
+`ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
+3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
+syntax in the bench has broken it there once already.
 
 Sections 1–20 cover motion, scaling, error handling and the failure paths; 21–30 cover
 the configuration capture, including that it sends queries and nothing else, that the
@@ -34,18 +40,52 @@ hot-key-scaled `O`/`OF` values are recorded but never replayed, that `UPR,Z` is 
 before the focus scaling that depends on it, and that a saved name cannot escape the
 configuration folder.
 
+## What the bench controller settled
+
+Run 2026-09-02 against a **ProScan H31XYZ, firmware `VERSION` 103** (1.03, compiled
+Nov 2017, HARDWARE REV F, 3-axis stepper, `DRIVE CHIPS 000111`) on an FTDI USB virtual
+COM port at 9600 baud. `?` reports `STAGE = NONE`, `FOCUS = NONE`,
+`JOYSTICK NOT FITTED` — the controller is bare.
+
+Confirmed working on hardware: `connect()` including the `ERROR,0`-first ordering,
+`VERSION`, the two-line `DATE` drain, `COMP`, `initialize()`, the `?` controller block,
+`STAGE`/`FOCUS`, `get_error_status()`, `LMT` decoding, `$` per-axis moving status, the
+rejection decoder, and `save_configuration()` — 34 of 39 settings answered, `XD`/`YD`
+left empty as designed. Real response formats are in
+`docs/command-map.md`, "Confirmed against hardware".
+
+Three things the bare controller taught us:
+
+1. **The zero-scale guard holds.** `RES,S`, `SS`, `SSZ` and `UPR,Z` all answer `0`, and
+   `determine_user_unit_in_microns()` raises on both X and Z rather than recording
+   positions against a scale of 0 or 1. This is the failure this driver most needed to
+   get right, and it does.
+2. **`report_status()` collapsed on it**, because it built the whole report in one `try`.
+   Fixed — see the fixes list below.
+3. **Firmware 1.03 has no software-limit query family.** `UNTLIMIT,?`, `CHKLIMITR`,
+   `CHKLIMITA`, `ACTLIMITR,?` and `ACTLIMITA,?` all answer `COMMAND_NOT_FOUND (E,5)`;
+   `SWLL`/`SWLH` answer `STRING_PARSE (E,4)`. This bears directly on the out-of-scope
+   item below about software limits as a safety envelope: on this firmware there is
+   nothing to read back, so a limits feature cannot verify it left them as it found them.
+
+Also worth knowing before the next hardware session: with no stage wired, `LMT` answers
+`0F`, so **all four X/Y limit switches read as active**. Any move attempt on a bare
+controller will look like a limit hit.
+
 ## The next thing to do
 
-Work through `docs/hardware-test-procedure.md` on the real controller, in order. Steps
-1–4 move nothing; step 4's scale check is the one that matters most, because a wrong
+Everything remaining needs a stage, a focus axis or a joystick attached. Work through
+`docs/hardware-test-procedure.md` from **step 3** (`configure()` and the joystick
+lockout), then step 4's scale check, which is still the one that matters most: a wrong
 `user_unit_in_microns` scales every recorded position by a constant factor and looks
-entirely plausible in the data. Nothing else should be built until that passes.
+entirely plausible in the data. Steps 1, 2 and 7a are done.
 
-The second hardware job is a `save_configuration` on the real controller, then reading
-the resulting `.ini` by eye. The capture is the part most likely to surprise: it queries
-about forty properties, and the simulator's idea of what each returns is a reading of
-the manual, not evidence. Expect to fill in `XD` and `YD` by hand — they have no query
-form (see below).
+Then step 4's known-answer check, steps 5 and 6 (first motion, translation sequences),
+step 8's deliberate failures, and step 9's homing last of all.
+
+The remaining configuration-capture job is `apply_configuration` on hardware — the
+capture has been run and read, but nothing has been written back to a controller yet, and
+restore is the asymmetric half (`docs/configuration-capture.md`).
 
 ## Deliberately out of scope
 
@@ -56,7 +96,7 @@ up is a short job.
 |---|---|---|
 | Simultaneous multi-axis moves (`G x,y[,z]`) | 4.3 | Would need a different module or three coordinated instances; `Robot` may fit better than `Switch` |
 | Constant-velocity moves (`VS`, `VZ`) | 4.3, 4.4 | For scanning at fixed speed rather than point-to-point |
-| *Setting* software limits (`XLIMITA`/`XLIMITR`/`SWLL`/`SWLH`/`ACTLIMIT*`) | 4.3 | Worth adding as a safety envelope. Currently read as reference data only. Note they interfere with `SIS`/`RIS` |
+| *Setting* software limits (`XLIMITA`/`XLIMITR`/`SWLL`/`SWLH`/`ACTLIMIT*`) | 4.3 | Worth adding as a safety envelope. Currently read as reference data only. Note they interfere with `SIS`/`RIS` — **and that firmware 1.03 rejects the whole query family with `E,5`, so on that firmware a limits feature could not read back what it set** |
 | Stage mapping and patterns | 4.9, 4.10 | Controller-side scan patterns |
 | TTL triggering, trigger board, encoders | 4.16–4.21 | The obvious pairing with a photon counter — a TTL pulse on move completion |
 | `OEM` per-axis commands, including `OEM,n,HOME` | 4.11 | Direct axis control that bypasses the stage abstraction |
@@ -89,12 +129,36 @@ Also corrected: `E18` and `E,18` are the same rejection in different manual sect
 both are now decoded, and the Z scale prefers the documented `UPR,Z` query over parsing
 `MICRONS/REV` out of the `FOCUS` block.
 
+Two more, found later:
+
+6. **`report_status()` collapsed when any one reading failed.** It built the whole report
+   inside a single `try`, so a controller with no stage fitted — where `RES` and `SS`
+   answer `0` and the user-unit line is genuinely impossible — produced only
+   "could not read the status: ...", with no version, position, limit switches or error
+   state. The action you reach for when something is already wrong failed hardest in
+   exactly the case it exists to explain. Each reading is now independent and an
+   unreadable one is marked in place. → section 15.
+7. **The bench used Python 3.10+ syntax.** `zip(..., strict=False)` in the simulator made
+   the bench 182/183 on Python 3.9, the floor `pyproject.toml` pins and the version
+   SweepMe! 1.5.6 ships. It surfaced as a *driver* failure —
+   "zero_this_axis() resets only this axis" — because actions swallow exceptions into
+   `message_box`, so the real message arrived as "zip() takes no keyword arguments" in a
+   dialog nobody was reading. Run the bench on 3.9 before believing it is green.
+
 ## Known gaps in the verification
 
-Honest limits of the 183 checks:
+Honest limits of the 188 checks:
 
-- **No hardware.** The simulator is a reading of the manual. Where the manual is silent —
-  the serial frame format above all — the simulator cannot be evidence.
+- **Nothing that moves has been run on hardware.** The controller on the bench has no
+  stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`
+  accounting, arrival tolerance, the stop and timeout paths, limit-switch detection
+  after a real move, backlash, `SIS`/`SIZ`/`RIS`, and the joystick lockout — is still
+  simulator-only. So is `apply_configuration`: nothing has been written back to a real
+  controller.
+- **The simulator is still a reading of the manual** everywhere hardware has not touched
+  it. The response formats now confirmed are listed in `docs/command-map.md`; treat the
+  rest as inference. Note also that the one controller seen so far is firmware 1.03, so
+  a command it rejects may simply be newer than it.
 - **`XD`/`YD` cannot be captured.** No command in 4.2–4.4 reports the mechanical
   direction of a commanded stage move. A saved configuration leaves both keys empty
   rather than guessing. This is a documented gap, not a bug.

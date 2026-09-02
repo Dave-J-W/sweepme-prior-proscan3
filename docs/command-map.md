@@ -102,6 +102,32 @@ argument list, which is how `ZD,d` was confirmed to answer `0` rather than the `
 column-aligned reading suggests, and how the blank `RES` response cells were confirmed as
 genuinely blank.
 
+## Confirmed against hardware
+
+Read from a ProScan H31XYZ, **firmware `VERSION` 103** (1.03, compiled Nov 2017,
+HARDWARE REV F, 3-axis stepper), on 2026-09-02. Everything above this section was a reading
+of the manual; these are observations.
+
+| Command | Answered | Note |
+|---|---|---|
+| `VERSION` | `103` | three figures, as documented |
+| `COMP` | `0` | |
+| `ERROR` | `0` | |
+| `$,X` | `0` | |
+| `LMT` | `0F` | **two hex digits confirmed** — 0x0F is the four X/Y limits |
+| `SMS` | `100` | |
+| `SAS` | `100` | |
+| `BLSH` | `1,125` | two fields, `on/off,distance` |
+| `BOGUS` | `E,5` | invalid commands do decode as `COMMAND_NOT_FOUND` |
+
+**Firmware 1.03 does not implement the software-limit query family at all.** All of
+`UNTLIMIT,?`, `CHKLIMITR`, `CHKLIMITA`, `ACTLIMITR,?` and `ACTLIMITA,?` — rows 5 to 9 of
+the reference block above — answer `COMMAND_NOT_FOUND (E,5)`. `SWLL` and `SWLH` answer
+`STRING_PARSE (E,4)`, so those two exist but will not be queried bare. The configuration
+capture handles this correctly already, recording each as `NOT AVAILABLE` with the
+rejection quoted, but anything built on software limits as a safety envelope needs a
+firmware check first.
+
 ## Limit-switch bit field (manual 4.2)
 
 | D07 | D06 | D05 | D04 | D03 | D02 | D01 | D00 |
