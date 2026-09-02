@@ -1288,6 +1288,19 @@ class Device(EmptyDevice):
                 f"{step_units * scale:.3f} µm and back, tolerance {tolerance:.3f} µm",
             ))
 
+            # Clear the '=' latch before moving, the same way configure() does. It latches
+            # until read (manual 4.2), so a limit hit from before this action -- a joystick
+            # nudge into a limit, say -- would otherwise be read back after the first leg
+            # and reported as though this test had caused it.
+            stale = self.get_limit_switch_latch()
+            if stale:
+                checks.append((
+                    None,
+                    f"cleared a pre-existing '=' latch of {stale} "
+                    f"({self.decode_limit_bits(stale)}) before moving, so it is not "
+                    "misattributed to this test",
+                ))
+
             for label, destination_units in (
                 ("out", start_units + step_units),
                 ("back", start_units),

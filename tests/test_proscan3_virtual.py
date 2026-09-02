@@ -794,6 +794,28 @@ def test_self_tests(driver) -> None:
         "tier 3 never homes",
     )
 
+    # --- a stale '=' latch must not be blamed on this test
+    #
+    # '=' latches until read (manual 4.2), so a limit hit before the action -- a joystick
+    # nudge into a limit, say -- would be read back after the first leg and reported as
+    # though the test had caused it. It must be cleared before moving.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    instrument.position_microsteps["X"] = 10_000 * 25
+    instrument.limit_latch = 1 << 0          # +X latched by something earlier
+    device.messages = []
+    device.run_self_test_motion()
+    report = "\n".join(device.messages)
+    check(
+        "cleared a pre-existing '=' latch" in report,
+        "a stale limit latch is cleared and reported before the move",
+    )
+    check("FAIL" not in report, "and the move is not failed because of it")
+    check(
+        instrument.position_in_user_units("X") == 10_000,
+        "and the axis still ends where it started",
+    )
+
     # --- a limit hit mid-test stops it, and it does not move again
     class TightTravel(ProScanIIISimulator):
         """An axis with less than the test move left in the positive direction."""

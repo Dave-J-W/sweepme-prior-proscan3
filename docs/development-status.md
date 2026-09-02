@@ -33,7 +33,7 @@ settled" below for what that does and does not license.
 | Motion self-test, ±500 µm (tier 3) | written; **its refusals are verified on hardware, the move itself is not** |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **268/268**, exit 0, across 32 sections.
+`python tests/test_proscan3_virtual.py` → **271/271**, exit 0, across 32 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -237,7 +237,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 268 checks:
+Honest limits of the 271 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`
