@@ -7,16 +7,19 @@ feature).
 ## Where the work stands
 
 Implemented and verified against the simulator. **Communication, every read-only query,
-error decoding, the configuration capture and the joystick lockout have now been run
-against a real controller**; nothing that moves an axis has, because the controller
-available has a joystick but no stage and no focus axis. See "What the bench controller
-settled" below for what that does and does not license.
+error decoding, the configuration capture, the joystick lockout, the TTL port and — with
+an H101A stage now attached — `configure()` and the user-unit scale have all been run
+against a real controller.** What has still never happened is a *move*: no `G` command has
+ever been sent to a real motor, so the end-of-move `R` accounting, the stop and timeout
+paths, arrival tolerance, backlash and limit detection during travel remain
+simulator-only. See "What the bench controller settled" below for what that does and does
+not license.
 
 | Capability | State |
 |---|---|
 | Absolute one-dimensional moves on X, Y or the focus axis | done |
 | Relative moves, resolved against a fresh position read | done |
-| Micron ↔ user-unit conversion, read from the controller | done, `RES` then `UPR,Z`/`SS` fallbacks |
+| Micron ↔ user-unit conversion, read from the controller | done, `RES` then `UPR,Z`/`SS` fallbacks. **`RES` vs `SS`/`STAGE` cross-check confirmed on an H101A: both give 1 µm/unit** |
 | End-of-move waiting without sending commands mid-move | done |
 | Stop button and move timeout, both ending in a controlled `I` | done |
 | Limit-switch detection after each move | done |
@@ -28,7 +31,7 @@ settled" below for what that does and does not license.
 | Compatibility-mode recovery (`COMP,0`) | done |
 | Homing and zeroing as action buttons | done |
 | Read-only status diagnostic | done |
-| Read-only self-test (tier 1) | done, **10/10 on hardware**, X, Y and Z |
+| Read-only self-test (tier 1) | done, **12/12 on hardware with a stage**, 10/10 bare |
 | Joystick lockout self-test (tier 2) | done, **5/5 on hardware** with a joystick attached |
 | Motion self-test, ±500 µm (tier 3) | written; **its refusals are verified on hardware, the move itself is not** |
 | Configuration capture to a commented `.ini`, and restore | done |
@@ -59,9 +62,10 @@ before anything is sent, and that `LTTL` consumes its latch.
 Run 2026-09-02 against a **ProScan H31XYZ, firmware `VERSION` 103** (1.03, compiled
 Nov 2017, HARDWARE REV F, 3-axis stepper, `DRIVE CHIPS 000111`) on an FTDI USB virtual
 COM port at 9600 baud. In this first session `?` reported `STAGE = NONE`, `FOCUS = NONE`
-and `JOYSTICK NOT FITTED` — the controller was completely bare. A joystick was attached
-later the same day; see "The joystick session" below. The stage and focus axis are still
-absent.
+and `JOYSTICK NOT FITTED` — the controller was completely bare. A joystick and then an
+H101A stage were attached later the same day; see "The joystick session" and "The stage
+session" below. **The focus axis is still absent**, so every `FOCUS`/`Z` result below
+still stands as the unfitted case.
 
 Confirmed working on hardware: `connect()` including the `ERROR,0`-first ordering,
 `VERSION`, the two-line `DATE` drain, `COMP`, `initialize()`, the `?` controller block,
@@ -106,9 +110,55 @@ What the bare controller taught us:
    `= NONE`. Use `?`, or the forms that do reject — `7,w,F` gives `E,17` and `8,s` gives
    `E,20`.
 
-Also worth knowing before the next hardware session: with no stage wired, `LMT` answers
-`0F`, so **all four X/Y limit switches read as active**. Any move attempt on a bare
-controller will look like a limit hit.
+Also worth knowing, and now explained: with no stage wired, `LMT` answers
+`0F`, so **all four X/Y limit switches read as active**. The H101A reports
+`LIMITS = NORMALLY CLOSED`, which is why: an unplugged stage leaves the circuit open, and
+that reads as "limit active". Any move attempt on a bare controller looks like a limit hit.
+
+### The stage session — the scale is confirmed
+
+An **H101A/D** stage was connected and the controller power-cycled. Plug-and-play
+identification happens **only at power-up** (manual glossary: "auto-configure itself to
+work when powered up"; setup step 9 asks for the controller to be *off* before
+connecting), so a stage plugged into a running controller is invisible. Before the cycle:
+
+| Reading | Meaning |
+|---|---|
+| `LMT` went `0F` → `00` | the stage **was** wired: the limit inputs were being driven |
+| `STAGE = NONE` still | but the identity chip had not been read |
+| `RES,S`, `SS` still `0` | so `configure()` still refused |
+
+That combination is worth remembering: it distinguishes *not plugged in* from *plugged in
+but not detected*, which no single reading gives you.
+
+After the power cycle:
+
+```
+STAGE = H101A   TYPE = 2   SIZE_X = 114 MM   SIZE_Y = 75 MM
+MICROSTEPS/MICRON = 25     LIMITS = NORMALLY CLOSED
+RES,S = 1      SS = 25
+```
+
+**The `RES` vs `SS`/`STAGE` cross-check passes exactly on hardware.** `SS` ÷
+`MICROSTEPS/MICRON` = 25 ÷ 25 = 1 µm per user unit, and `RES,S` independently answers `1`.
+Two derivations agreeing, with no disagreement warning raised. This was the single
+highest-risk path in the driver — a constant-factor scale error produces data that looks
+entirely plausible — and it is now evidence rather than inference. **It is confirmed for
+this stage only**; another stage, or a hand-changed `SS`, has to be re-checked.
+
+`configure()` completed on hardware for the first time, giving
+`user_unit_in_microns = 1.0` and a position of 4154 µm. Tier 1 now scores **12/12** with
+a real stage, up from 10/10 bare.
+
+`LIMITS = NORMALLY CLOSED` also explains the earlier `LMT = 0F` on a bare controller: with
+normally-closed switches an unplugged stage leaves the circuit open, which reads as "limit
+active". That was the documented switch convention, not a floating input.
+
+**Still not done on this pairing: `SIS`.** Manual 4.17 is emphatic that it "MUST BE DONE
+ONCE AT INITIAL CONNECTION OF STAGE TO CONTROLLER IN ORDER TO ESTABLISH A UNIQUE REFERENCE
+POSITION WHICH IS PERMANENTLY REMEMBERED BY THE CONTROLLER." Until it is, absolute
+positions are relative to whatever the controller's counter happened to hold. It drives
+into both hard limits, so it stays an action button.
 
 ### The joystick session
 

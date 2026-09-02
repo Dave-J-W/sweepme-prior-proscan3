@@ -248,7 +248,7 @@ then be read back. Observed with the **top-right button set to TTL2 / High**:
 | Command | Answer | Meaning |
 |---|---|---|
 | `TTL` (bare) | `4` at rest, `6` with the button latched | `DCBA`; `A` is the four `TTL_OUT` bits. **Leading zeros are omitted** — parse it as variable-width hex, never a fixed four characters |
-| `TTL,2,?` | `1` | `TTL_OUT 2` is high at rest and stayed high across ~1 400 samples in two windows. A standing state, unexplained, unrelated to the button |
+| `TTL,2,?` | `1` | `TTL_OUT 2` was high for that whole session and stayed high across ~1 400 samples. **Not a power-on default** — a later power cycle brought the port up at `0x0`, so something in the session had asserted it. Do not assume the outputs start low *or* that a high line is intrinsic |
 | `TTL,1,?` | `0` → `1` on press | **the bit the button drives** |
 | `TTL,8..11,?` | `0` | the four `TTL_IN` bits, all idle. `TTL_IN` is addressed as n=8..11 for H129 compatibility |
 | `LTTL` | `0,0` throughout, 702 calls | correct, not a miss: it latches **input** transitions, and this is an output |

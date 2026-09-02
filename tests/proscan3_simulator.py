@@ -84,9 +84,11 @@ class ProScanIIISimulator:
         self.joystick_xy_enabled = True
         self.stall_forever = stall_forever
 
-        # TTL port, manual 4.19. The bench controller idles with TTL_OUT 2 high, so the
-        # default is 0x4 rather than 0 -- a driver that assumes the lines start low is
-        # then wrong against the one controller we have seen.
+        # TTL port, manual 4.19. Defaulted to 0x4 rather than 0 so that a driver assuming
+        # the lines start low is caught. Note this is NOT a power-on default: the bench
+        # controller read TTL_OUT 2 high for a whole session and then 0x0 after a power
+        # cycle, so something in that session had set it. The point of the non-zero
+        # default is only that an output may already be asserted when a run begins.
         self.ttl_outputs = 0x4
         self.ttl_inputs = 0x0
         self.ttl_went_high = 0
