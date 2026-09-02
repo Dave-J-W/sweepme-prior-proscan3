@@ -528,6 +528,37 @@ def test_actions(driver) -> None:
     device.stop_motion()
     check(True, "stop_motion() completes")
 
+    # Observed on the bench controller, firmware 1.03, with STAGE = NONE: RES and SS both
+    # answer 0, so the user-unit line cannot be produced. report_status() is the action you
+    # reach for when something is already wrong, so it must still report everything else.
+    class NoStageFitted(ProScanIIISimulator):
+        """A controller with nothing plugged into it: the scale is unreadable."""
+
+        def _cmd_res(self, arguments):
+            self.out.append("0")
+
+        def _cmd_ss(self, arguments):
+            self.out.append("0")
+
+        def _cmd_stage(self, arguments):
+            self.out.extend(["STAGE = NONE", "END"])
+
+    device = make_device(driver, NoStageFitted())
+    device.connect()
+    device.initialize()
+    device.messages = []
+    device.report_status()
+    status = "\n".join(device.messages)
+    check(
+        "unavailable" in status,
+        "report_status() marks the unreadable user unit as unavailable",
+    )
+    for label in ("Version: 116", "Position: 0 user units", "Active limit switches", "STAGE = NONE"):
+        check(
+            label in status,
+            f"report_status() still reports {label!r} when the scale is unreadable",
+        )
+
     # Every action, against a dead port, must report rather than raise.
     dead = make_device(driver, DeadPort())
     for name in driver.Device.actions:

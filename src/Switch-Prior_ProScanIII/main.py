@@ -842,21 +842,45 @@ class Device(EmptyDevice):
         """Read-only diagnostic: controller, axis, position, limits and error state.
 
         Sends only query commands. Do not add anything here that changes controller state.
+
+        Each reading is taken independently. This is the action reached for when something
+        is already wrong, so one unreadable value must not take the rest of the report with
+        it: a controller with no stage fitted answers RES and SS with 0, which makes the
+        user-unit line impossible while the version, position, limit switches and error
+        state are all still perfectly readable.
         """
+
+        def line(label: str, read) -> str:
+            """One labelled reading, reporting its own failure in place."""
+            try:
+                return f"{label}: {read()}"
+            except Exception as exc:  # noqa: BLE001 - a diagnostic reports, it does not abort
+                return f"{label}: unavailable - {exc}"
+
+        def block(read) -> list:
+            """One multi-line response, likewise."""
+            try:
+                return list(read())
+            except Exception as exc:  # noqa: BLE001 - a diagnostic reports, it does not abort
+                return [f"unavailable - {exc}"]
+
+        lines = [
+            line("Version", self.get_version),
+            line("Date", self.get_date_string),
+            f"Axis: {self.axis}",
+            line("Position", lambda: f"{self.get_position_in_user_units()} user units"),
+            line("User unit", lambda: f"{self.determine_user_unit_in_microns():.6g} µm"),
+            line("Moving", self.is_axis_moving),
+            line(
+                "Active limit switches (LMT)",
+                lambda: self.decode_limit_bits(self.get_active_limit_switches()),
+            ),
+            "",
+            *block(self.get_axis_information),
+            "",
+            *block(self.get_error_status),
+        ]
         try:
-            lines = [
-                f"Version: {self.get_version()}",
-                f"Date: {self.get_date_string()}",
-                f"Axis: {self.axis}",
-                f"Position: {self.get_position_in_user_units()} user units",
-                f"User unit: {self.determine_user_unit_in_microns():.6g} µm",
-                f"Moving: {self.is_axis_moving()}",
-                f"Active limit switches (LMT): {self.decode_limit_bits(self.get_active_limit_switches())}",
-                "",
-                *self.get_axis_information(),
-                "",
-                *self.get_error_status(),
-            ]
             self.message_box("\n".join(lines))
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: could not read the status: {exc}")
