@@ -445,6 +445,22 @@ def test_error_decoding(driver) -> None:
         contains="NOT_IDLE",
     )
 
+    # The bench controller answers every OEM,n,<property> and every NP form with E,128,
+    # which is absent from the V 1.16 error table -- it stops at 53. An undocumented code
+    # must still raise, and must still say what it was, rather than becoming a data point.
+    class UndocumentedCode(ProScanIIISimulator):
+        """Firmware that rejects with a code the manual does not list."""
+
+        def _cmd_version(self, arguments):
+            self.out.append("E,128")
+
+    undocumented = make_device(driver, UndocumentedCode())
+    expect_error(
+        undocumented.get_version,
+        "an undocumented error code still raises, naming the code",
+        contains="UNKNOWN_ERROR (E,128)",
+    )
+
 
 def test_sweepmode_none(driver) -> None:
     """With SweepMode 'None' the driver is a pure position reader."""
