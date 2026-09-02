@@ -97,7 +97,10 @@ def make_device(driver, port, **overrides):
     device.port = port
 
     device.messages = []
-    device.message_info = device.messages.append
+    # Both go through a lambda that looks the list up on the device each time. Binding
+    # device.messages.append directly would capture THIS list object, so a test doing
+    # `device.messages = []` would keep collecting into the old one and see nothing.
+    device.message_info = lambda text: device.messages.append(text)
     device.message_box = lambda text, blocking=False: device.messages.append(text)
     return device
 
@@ -929,6 +932,192 @@ def test_end_of_move_is_not_the_acknowledgement(driver) -> None:
     check("I" in instrument.log, "and 'I' was actually sent")
 
 
+def test_motion_settings_bracket(driver) -> None:
+    """Speed/acceleration/jerk are applied for the run and put back afterwards."""
+    print("\n[34] speed, acceleration and jerk: applied and restored")
+
+    # A controller set up by hand, so "restore" has something distinctive to put back.
+    def prepared():
+        instrument = ProScanIIISimulator()
+        instrument.max_speed["X"] = 42
+        instrument.acceleration["X"] = 37
+        instrument.s_curve["X"] = 55
+        return instrument
+
+    instrument = prepared()
+    device = bring_up(
+        driver, instrument,
+        **{
+            "Speed (empty = unchanged)": "80",
+            "Acceleration (empty = unchanged)": "60",
+            "Jerk / S-curve (empty = unchanged)": "150",
+        },
+    )
+    check(instrument.max_speed["X"] == 80, "the requested speed is applied")
+    check(instrument.acceleration["X"] == 60, "the requested acceleration is applied")
+    check(instrument.s_curve["X"] == 150, "the requested jerk is applied as SCS")
+    check("SCS,150" in instrument.log, "using the documented SCS command")
+
+    device.unconfigure()
+    check(instrument.max_speed["X"] == 42, f"speed restored to 42, got {instrument.max_speed['X']}")
+    check(
+        instrument.acceleration["X"] == 37,
+        f"acceleration restored to 37, got {instrument.acceleration['X']}",
+    )
+    check(instrument.s_curve["X"] == 55, f"jerk restored to 55, got {instrument.s_curve['X']}")
+
+    # Restoring can be declined, for a setting meant to outlive the run.
+    instrument = prepared()
+    device = bring_up(
+        driver, instrument,
+        **{
+            "Speed (empty = unchanged)": "80",
+            "Restore speed/accel/jerk at end of run": False,
+        },
+    )
+    device.unconfigure()
+    check(instrument.max_speed["X"] == 80, "with restore off, the run's speed outlives it")
+
+    # All three fields empty must not read or write any of them.
+    instrument = prepared()
+    device = bring_up(driver, instrument)
+    touched = [
+        command
+        for command in instrument.log
+        if command.upper().startswith(("SMS", "SAS", "SCS", "SMZ", "SAZ", "SCZ"))
+    ]
+    check(not touched, f"empty fields neither read nor write the settings, sent {touched}")
+    device.unconfigure()
+    check(instrument.max_speed["X"] == 42, "and the hand-set speed is untouched")
+
+    # Only what was asked for is changed; the others are still read, for the restore.
+    instrument = prepared()
+    device = bring_up(driver, instrument, **{"Jerk / S-curve (empty = unchanged)": "200"})
+    check(instrument.s_curve["X"] == 200, "jerk alone can be set")
+    check(instrument.max_speed["X"] == 42, "and the speed is left alone")
+    device.unconfigure()
+    check(instrument.s_curve["X"] == 55, "jerk is restored")
+
+    # Range checks come from the same per-axis table as speed and acceleration:
+    # manual 4.3 gives SCS 1-1000, manual 4.4 gives SCZ 1-100.
+    device = bring_up(driver, ProScanIIISimulator(), Axis="Z")
+    expect_error(
+        lambda: device.set_s_curve(101),
+        "SCZ above 100 is refused, the Z range being stated without the 'higher allowed' note",
+    )
+    # SCS is strict where SMS and SAS are lenient. Manual 4.3 gives SMS/SAS as
+    # "Range is 1 to 1000 ... Higher values are allowed", but SCS as a bare "Range of c is
+    # 1 to 1000" with no such note -- and firmware 1.03 rejects SCS,1500 with
+    # ARG1_OUT_OF_RANGE, so passing it on the way speed does only earns a rejection.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    expect_error(
+        lambda: device.set_s_curve(1500),
+        "SCS above 1000 is refused, unlike speed and acceleration",
+        contains="must be between 1 and 1000",
+    )
+    check(
+        not [c for c in instrument.log if c.startswith("SCS,1500")],
+        "and nothing was sent to the controller",
+    )
+    device.messages = []
+    device.set_max_speed(1500)
+    check(
+        any("above the documented range" in m for m in device.messages),
+        "while SMS above 1000 is still passed on with a warning",
+    )
+
+
+def test_homing_uses_hardware_defaults(driver) -> None:
+    """Homing runs at the documented default speed/accel/jerk, then restores."""
+    print("\n[35] homing at the hardware defaults")
+
+    instrument = ProScanIIISimulator()
+    instrument.max_speed["X"] = 42
+    instrument.acceleration["X"] = 37
+    instrument.s_curve["X"] = 55
+    device = bring_up(driver, instrument)
+    device.messages = []
+    device.set_index()
+    report = "\n".join(device.messages)
+
+    check("SIS" in instrument.log, "SIS is sent")
+    during = instrument.settings_during_index
+    check(during is not None, "the simulator recorded the settings SIS ran at")
+    if during:
+        check(
+            during["speed"]["X"] == 100
+            and during["acceleration"]["X"] == 100
+            and during["s_curve"]["X"] == 100,
+            f"SIS ran at the hardware defaults, got speed {during['speed']['X']}, "
+            f"accel {during['acceleration']['X']}, jerk {during['s_curve']['X']}",
+        )
+    check(instrument.max_speed["X"] == 42, "and the previous speed is restored afterwards")
+    check(instrument.acceleration["X"] == 37, "and the acceleration")
+    check(instrument.s_curve["X"] == 55, "and the jerk")
+    check("restored" in report, "the message says what was restored")
+
+    # SIS drives into both hard limits and takes time. 'R' is only an acknowledgement on
+    # firmware 1.03, so the action must wait for X *and* Y to stop -- SIS acts on the
+    # whole stage, not just the selected axis.
+    instrument = ProScanIIISimulator()
+    instrument.indexing_seconds = 0.4
+    device = bring_up(driver, instrument)
+    began = time.time()
+    device.set_index()
+    elapsed = time.time() - began
+    check(elapsed >= 0.4, f"set_index() waits for the mechanics, not just 'R' ({elapsed:.2f} s)")
+    check(
+        not instrument._is_moving("X") and not instrument._is_moving("Y"),
+        "and both stage axes are idle when it returns",
+    )
+
+    # Already at the defaults: nothing to change, nothing to restore.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    device.messages = []
+    device.set_index()
+    report = "\n".join(device.messages)
+    check("Already at the hardware defaults" in report, "a controller already on 100 says so")
+    check(
+        not [c for c in instrument.log if c.upper().startswith(("SMS,", "SAS,", "SCS,"))],
+        "and nothing is written",
+    )
+
+    # A failure mid-homing must still restore the settings.
+    class IndexFails(ProScanIIISimulator):
+        def _cmd_sis(self, arguments):
+            self._error(1)          # NO_STAGE
+
+    instrument = IndexFails()
+    instrument.max_speed["X"] = 42
+    device = bring_up(driver, instrument)
+    device.messages = []
+    device.set_index()
+    report = "\n".join(device.messages)
+    check("failed" in report, "a rejected SIS is reported")
+    check(
+        instrument.max_speed["X"] == 42,
+        f"and the settings are restored anyway, got {instrument.max_speed['X']}",
+    )
+
+    # RIS gets the same treatment, and stays refused on the Z axis.
+    instrument = ProScanIIISimulator()
+    instrument.acceleration["X"] = 37
+    device = bring_up(driver, instrument)
+    device.messages = []
+    device.restore_index_of_stage()
+    check("RIS" in instrument.log, "RIS is sent")
+    check(instrument.acceleration["X"] == 37, "and RIS restores the acceleration too")
+    device = bring_up(driver, ProScanIIISimulator(), Axis="Z")
+    device.messages = []
+    device.restore_index_of_stage()
+    check(
+        any("X/Y stage, not the Z axis" in m for m in device.messages),
+        "RIS is still refused on the focus axis",
+    )
+
+
 def test_ttl_port(driver) -> None:
     """The TTL port: reads, the guarded write forms, and the run bracket."""
     print("\n[32] TTL port")
@@ -1577,6 +1766,8 @@ def main() -> int:
         test_configuration_action_never_raises,
         test_self_tests,
         test_end_of_move_is_not_the_acknowledgement,
+        test_motion_settings_bracket,
+        test_homing_uses_hardware_defaults,
         test_ttl_port,
     ):
         test(driver)

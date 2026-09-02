@@ -47,6 +47,8 @@ rather than raising.
 | `get_error_status` | `ERRORSTAT` | text block ending in `END` | 4.13 |
 | `set_max_speed` | `SMS,<m>` (X/Y) / `SMZ,<m>` (Z) | `0` | 4.3, 4.4 |
 | `set_acceleration` | `SAS,<a>` (X/Y) / `SAZ,<a>` (Z) | `0` | 4.3, 4.4 |
+| `set_s_curve` | `SCS,<c>` (X/Y) / `SCZ,<c>` (Z) | `0` | 4.3, 4.4 |
+| `get_motion_settings` | `SMS` / `SAS` / `SCS`, or the Z forms | one value each | 4.3, 4.4 |
 | `set_joystick_enabled(False)` | `H,1` | `0` | 4.3 |
 | `set_joystick_enabled(True)` | `J` | `0` | 4.3 |
 | `get_joystick_status_line` | `?` | the `JOYSTICK …` line of the block | 4.2 |
@@ -373,6 +375,43 @@ Used by both `=` and `LMT`, but with **different number bases** — see the quir
 `NO_VACUUM_DETECTOR` 45, `NO_SHUTTLE` 46, `VACUUM_QUEUED` 47, `SIZ_NOT_DONE` 48,
 `NOT_SLIDE_LOADER` 49, `ALREADY_PRELOADED` 50, `STAGE_NOT_MAPPED` 51,
 `TRIGGER_NOT_FITTED` 52, `INTERPOLATOR_NOT_FITTED` 53.
+
+## Speed, acceleration and jerk
+
+Manual 4.3 and 4.4. All three default to **100**, stated explicitly for `SMS` and `SAS`
+("Default setting is 100 and used by Prior during long life testing") and for `SCS` ("at
+default 100 setting curve time = 13ms"). Confirmed on the bench controller, which reported
+100 for all six of `SMS`/`SAS`/`SCS` and `SMZ`/`SAZ`/`SCZ`.
+
+| Setting | X/Y | Range | Z | Range |
+|---|---|---|---|---|
+| Max speed | `SMS` | 1–1000, higher allowed | `SMZ` | 1–100, strict |
+| Acceleration | `SAS` | 1–1000, higher allowed | `SAZ` | 1–100, strict |
+| Jerk (S-curve) | `SCS` | **1–1000, strict** | `SCZ` | 1–100, strict |
+
+Two traps here:
+
+1. **`SCS` is strict where `SMS` and `SAS` are lenient.** The manual gives speed and
+   acceleration as "Range is 1 to 1000 ... **Higher values are allowed** but their efficacy
+   is constrained", and the driver passes those on with a warning. `SCS` gets a bare "Range
+   of c is 1 to 1000" with no such note — and firmware 1.03 rejects `SCS,1500` with
+   `ARG1_OUT_OF_RANGE (E,10)`, while accepting exactly 1000. So the axis-wide leniency must
+   not be applied to the S-curve. Applying it was a real defect, caught by the simulator
+   enforcing the documented bound.
+2. **Higher jerk is sharper, not smoother.** `SCS` is expressed in time, not units/s³:
+   "at default 100 setting curve time = 13ms. At 200 curve time = 6.5ms." Someone reaching
+   for a gentler ramp wants a *lower* number.
+
+The driver reads all three before a run changes any of them and puts them back in
+`unconfigure()`, so a scan cannot silently leave the controller altered — which would make
+a later measurement by hand, or by another SweepMe! module, non-reproducible. Homing
+(`SIS`/`SIZ`/`RIS`) forces all three to 100 first and restores afterwards, because driving
+into a hard limit should not inherit a speed or jerk tuned for a short scan.
+
+Note these are the *serial* move settings. The joystick has its own speed, `O` for the
+stage and `OF` for the focus axis, which this driver never writes. Whether the joystick's
+effective speed derives from `SMS` is not established here — restoring `SMS` protects
+against it either way.
 
 ## Quirks the driver defends against
 

@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 286 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 319 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -37,6 +37,8 @@ point `pysweepme.get_driver` at) and add a **Switch** module to the sequencer.
 | **Axis** | `X`, `Y`, or `Z`. `Z` is the focus axis, whose user unit defaults to 0.1 µm rather than 1 µm |
 | **Baud rate** | Must match what the controller port is already set to. The driver never sends `BAUD` |
 | **Speed**, **Acceleration** | Leave empty to keep the controller's settings. Documented range 1–1000 for X/Y (`SMS`/`SAS`), 1–100 for Z (`SMZ`/`SAZ`). The manual allows higher X/Y values without guaranteeing the result, so those are passed on with a warning; the Z range is enforced |
+| **Jerk / S-curve** | The rate of change of acceleration (`SCS` for X/Y, `SCZ` for Z). **Higher is sharper, not smoother** — the manual expresses it in time, so 100 is 13 ms of curve and 200 is 6.5 ms. Range 1–1000 for X/Y and 1–100 for Z, both **strictly enforced**: unlike speed and acceleration the manual gives no "higher values allowed" note, and firmware 1.03 rejects `SCS,1500` |
+| **Restore speed/accel/jerk at end of run** | Put all three back to what they were before the run. On by default, so a scan cannot silently leave the controller altered and make a later measurement non-reproducible. The values are read *before* anything is changed, so whatever was set by hand is what comes back |
 | **Move timeout in s** | How long to wait for the end-of-move `R` before stopping the axis and raising |
 | **Position tolerance in µm** | How far the readback may differ from the target before the point is treated as a failure |
 | **Disable Joystick during SweepMe Run** | Sends `H,1` in `initialize()` and `J` in `disconnect()`, so a nudged joystick cannot corrupt a scan. Deliberately *not* `configure()`/`unconfigure()`, which SweepMe! calls once per branch — a lockout taken there is released and retaken between branches, leaving the joystick live in the gaps. The pre-rename field name `Disable joystick during run` is still accepted, so older saved sequences keep working |
@@ -52,8 +54,8 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 | Action | What it does |
 |---|---|
 | `stop_motion` | `I` — controlled stop, empties the command queue |
-| `set_index` | `SIS` (X/Y) or `SIZ` (Z). **Moves into the hard limits** and sets zero there. `SIS` indexes and zeroes the **whole X/Y stage** to 0,0, not just the selected axis. Never automatic; press it deliberately, normally once after installation |
-| `restore_index_of_stage` | `RIS` — re-synchronise the whole X/Y stage with the controller after it was moved by hand while powered off. **Moves the stage.** Requires `SIS` to have been done once |
+| `set_index` | `SIS` (X/Y) or `SIZ` (Z). **Moves into the hard limits** and sets zero there. `SIS` indexes and zeroes the **whole X/Y stage** to 0,0, not just the selected axis. Never automatic; press it deliberately, normally once after installation. **Runs at the hardware default speed/acceleration/jerk (100 each)** and restores the previous values afterwards, so an endstop is not hit at a speed tuned for a scan |
+| `restore_index_of_stage` | `RIS` — re-synchronise the whole X/Y stage with the controller after it was moved by hand while powered off. **Moves the stage.** Requires `SIS` to have been done once. Also forced to the hardware defaults for the drive, then restored |
 | `zero_this_axis` | Sets this axis' position counter to zero without moving. Uses `PX`/`PY`/`PZ`, not the bare `Z` command, which would zero all three axes and clear the software limits |
 | `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT`. Each line is read independently, so one unreadable value does not take the whole report down |
 | `report_ttl` | Read-only diagnostic for the TTL port: the four `TTL_OUT` bits, the four `TTL_IN` bits, and the `LTTL` input latch. Note that reading `LTTL` **clears** it. This is the authoritative reading of TTL state — the joystick's own screen does not track host writes |
@@ -134,7 +136,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 286/286
+python tests/test_proscan3_virtual.py     # expect 319/319
 ruff check src tests
 ```
 
@@ -152,7 +154,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 286 checks covering the translation sequence, all three axes,
+No hardware needed. 319 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,

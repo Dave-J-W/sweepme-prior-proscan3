@@ -125,6 +125,11 @@ class ProScanIIISimulator:
         self.acceleration = {"X": 100, "Y": 100, "Z": 100}
         self.s_curve = {"X": 100, "Y": 100, "Z": 100}
 
+        # SIS/SIZ take real time on hardware; '$' must keep reporting movement until then.
+        self.indexing_seconds = 0.3
+        self.indexing_until: dict[str, float] = {}
+        self.settings_during_index: dict | None = None
+
         self.serial_number = serial_number
         self.unsupported_commands = {name.upper() for name in (unsupported_commands or set())}
 
@@ -269,6 +274,11 @@ class ProScanIIISimulator:
         return min(1.0, max(0.0, (time.time() - move["started_at"]) / span))
 
     def _is_moving(self, axis: str) -> bool:
+        # Indexing drives into the hard limits and takes real time, so '$' has to keep
+        # reporting movement for its duration -- otherwise a driver that waits only for
+        # SIS's 'R' acknowledgement looks correct here and is not on hardware.
+        if time.time() < self.indexing_until.get(axis, 0.0):
+            return True
         if self.active_move is not None and self.active_move["axis"] == axis:
             return True
         return any(queued_axis == axis for queued_axis, _ in self.move_queue)
@@ -973,6 +983,14 @@ class ProScanIIISimulator:
             self.limit_low[axis] = 0
             self.limit_high[axis] = span
             self.limit_latch |= 1 << LIMIT_BITS[f"-{axis}"]
+            self.indexing_until[axis] = time.time() + self.indexing_seconds
+        # Which speed/acceleration/S-curve the index ran at, so a test can assert that
+        # homing used the hardware defaults rather than whatever a run left behind.
+        self.settings_during_index = {
+            "speed": dict(self.max_speed),
+            "acceleration": dict(self.acceleration),
+            "s_curve": dict(self.s_curve),
+        }
         self.out.append("R")
 
     def _cmd_z(self, arguments: list[str]) -> None:

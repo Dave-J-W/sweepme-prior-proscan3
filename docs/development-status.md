@@ -35,19 +35,19 @@ Still simulator-only: anything on the focus axis, which is not fitted.
 | Stop button and move timeout, both ending in a controlled `I` | done |
 | Limit-switch detection after each move | done |
 | Arrival verification against a tolerance | done |
-| Speed and acceleration, optional | done |
+| Speed, acceleration and jerk, optional, **restored after the run** | done, **verified on hardware**: 40/50/200 applied then 100/100/100 put back |
 | Joystick lockout for the whole run (`initialize`→`disconnect`) | done, **verified on hardware** including surviving a configure/unconfigure cycle |
 | TTL port: read all eight lines, write the four outputs | done, **read and write both verified on hardware** |
 | Machine-readable error decoding, all 33 documented codes | done |
 | Compatibility-mode recovery (`COMP,0`) | done |
-| Homing and zeroing as action buttons | done |
+| Homing and zeroing as action buttons | done, and homing now **forces the hardware defaults and restores them**, and waits for the mechanics rather than for `R` |
 | Read-only status diagnostic | done |
 | Read-only self-test (tier 1) | done, **12/12 on hardware with a stage**, 10/10 bare |
 | Joystick lockout self-test (tier 2) | done, **5/5 on hardware** with a joystick attached |
 | Motion self-test, ±500 µm (tier 3) | done, **3/3 on hardware**, 0.000 µm error both legs |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **286/286**, exit 0, across 33 sections.
+`python tests/test_proscan3_virtual.py` → **319/319**, exit 0, across 35 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -339,7 +339,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 286 checks:
+Honest limits of the 319 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`

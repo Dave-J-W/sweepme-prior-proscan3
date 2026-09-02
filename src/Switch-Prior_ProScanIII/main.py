@@ -97,6 +97,12 @@ ERROR_CODES = {
     53: "INTERPOLATOR_NOT_FITTED",
 }
 
+# Manual 4.3, for SMS, SAS and SCS alike: "Default setting is 100 and used by Prior during
+# long life testing", and for SCS "at default 100 setting curve time = 13ms". Confirmed on
+# the bench controller, which reported 100 for all six of SMS/SAS/SCS and SMZ/SAZ/SCZ.
+# Used to put the axis on a known footing for homing, which drives into the hard limits.
+HARDWARE_DEFAULT_MOTION_SETTING = 100
+
 # How far run_self_test_motion() moves the selected axis, in microns, before returning it
 # to where it started. Deliberately small: far enough that a scaling error of a factor of
 # two is obvious on a dial gauge, short enough to be safe on an axis with limited travel.
@@ -137,6 +143,7 @@ AXIS_TABLE = {
         "info_command": "STAGE",
         "speed_command": "SMS",
         "acceleration_command": "SAS",
+        "scurve_command": "SCS",
         "setting_range": (1, 1000),
         # Manual 4.3: "Range is 1 to 1000 ... Higher values are allowed but their
         # efficacy is constrained by varying factors", so above 1000 is a warning.
@@ -153,6 +160,7 @@ AXIS_TABLE = {
         "info_command": "STAGE",
         "speed_command": "SMS",
         "acceleration_command": "SAS",
+        "scurve_command": "SCS",
         "setting_range": (1, 1000),
         "strict_setting_range": False,
         "index_command": "SIS",
@@ -167,6 +175,7 @@ AXIS_TABLE = {
         "info_command": "FOCUS",
         "speed_command": "SMZ",
         "acceleration_command": "SAZ",
+        "scurve_command": "SCZ",
         # Manual 4.4 states the Z range without the "higher values are allowed" note.
         "setting_range": (1, 100),
         "strict_setting_range": True,
@@ -566,6 +575,11 @@ class Device(EmptyDevice):
         self.ttl_outputs_at_start: int | None = None
         self.ttl_outputs_before_run: int | None = None
         self.restore_ttl_outputs: bool = True
+
+        # Speed/acceleration/jerk as they were before the run touched them, so they can be
+        # put back. None means the run was not asked to change any of them.
+        self.motion_settings_before_run: dict | None = None
+        self.restore_motion_settings: bool = True
         self.joystick_was_disabled: bool = False
 
         # Set when a wait was cut short by SweepMe!s stop button, so measure() can say
@@ -585,6 +599,10 @@ class Device(EmptyDevice):
             " ": None,
             "Speed (empty = unchanged)": "",
             "Acceleration (empty = unchanged)": "",
+            # Manual 4.3 calls this the S-curve: the rate of change of acceleration, i.e.
+            # the jerk limit. Higher is SHARPER -- 100 is 13 ms of curve, 200 is 6.5 ms.
+            "Jerk / S-curve (empty = unchanged)": "",
+            "Restore speed/accel/jerk at end of run": True,
             "  ": None,
             "Move timeout in s": "60",
             "Position tolerance in µm": "2.0",
@@ -609,6 +627,12 @@ class Device(EmptyDevice):
 
         self.speed_setting = str(parameter["Speed (empty = unchanged)"]).strip()
         self.acceleration_setting = str(parameter["Acceleration (empty = unchanged)"]).strip()
+        self.s_curve_setting = str(
+            parameter.get("Jerk / S-curve (empty = unchanged)", ""),
+        ).strip()
+        self.restore_motion_settings = bool(
+            parameter.get("Restore speed/accel/jerk at end of run", True),
+        )
 
         self.move_timeout = self._to_float(parameter["Move timeout in s"], "Move timeout in s")
         if self.move_timeout <= 0:
@@ -729,10 +753,19 @@ class Device(EmptyDevice):
 
         self.user_unit_in_microns = self.determine_user_unit_in_microns()
 
+        # Read the current speed/accel/jerk BEFORE changing any of them, so unconfigure()
+        # can put back what was actually there. Without this a run permanently altered the
+        # controller, which makes a later measurement by hand or by another module quietly
+        # non-reproducible.
+        if self.speed_setting or self.acceleration_setting or self.s_curve_setting:
+            self.motion_settings_before_run = self.get_motion_settings()
+
         if self.speed_setting:
             self.set_max_speed(int(self._to_float(self.speed_setting, "Speed")))
         if self.acceleration_setting:
             self.set_acceleration(int(self._to_float(self.acceleration_setting, "Acceleration")))
+        if self.s_curve_setting:
+            self.set_s_curve(int(self._to_float(self.s_curve_setting, "Jerk / S-curve")))
 
         # The joystick lockout is taken in initialize(), not here, so that it spans the
         # whole run rather than being released between branches.
@@ -752,6 +785,10 @@ class Device(EmptyDevice):
 
         The joystick lockout is released in disconnect(), not here.
         """
+        if self.restore_motion_settings and self.motion_settings_before_run is not None:
+            self.apply_motion_settings(self.motion_settings_before_run)
+            self.motion_settings_before_run = None
+
         if (
             self.restore_ttl_outputs
             and self.ttl_outputs_at_start is not None
@@ -877,18 +914,62 @@ class Device(EmptyDevice):
         active" (manual 4.3, XLIMITR/ACTLIMITR). Normally needed only once, on installation.
         """
         command = self.axis_commands["index_command"]
+        axes = ("Z",) if command == "SIZ" else ("X", "Y")
         try:
             if self.is_axis_moving():
                 self.message_box(
                     f"ProScan III: the {self.axis} axis is moving; {command} was not sent.",
                 )
                 return
-            self._write(command)
-            self._wait_for_response("R", timeout=max(self.move_timeout, 120.0))
+            note = self._home_with_default_motion_settings(command, axes)
             scope = "the X and Y axes" if command == "SIS" else "the Z axis"
-            self.message_box(f"ProScan III: {command} completed, indexing and zeroing {scope}.")
+            self.message_box(
+                f"ProScan III: {command} completed, indexing and zeroing {scope}.{note}",
+            )
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: {command} failed: {exc}")
+
+    def _home_with_default_motion_settings(self, command: str, axes: tuple) -> str:
+        """Send a homing command at the hardware default speed/acceleration/jerk.
+
+        Homing drives into the hard limits, so it should not inherit whatever a run left
+        behind: a speed or jerk tuned for a short scan is not a sensible thing to hit an
+        endstop with, and it makes the operation non-reproducible. Manual 4.3 gives 100 as
+        the default for SMS, SAS and SCS alike.
+
+        The previous settings are restored in a finally block, so an aborted or failed
+        homing cannot leave the axis on defaults it did not start with.
+        """
+        previous = None
+        defaults = {}
+        try:
+            previous = self.get_motion_settings()
+            defaults = dict.fromkeys(previous, HARDWARE_DEFAULT_MOTION_SETTING)
+            if defaults != previous:
+                self.apply_motion_settings(defaults)
+
+            self._write(command)
+            # 'R' is only an acknowledgement on firmware 1.03; wait for the mechanics.
+            self._wait_for_response("R", timeout=max(self.move_timeout, 120.0))
+            self.wait_until_axes_idle(axes, timeout=max(self.move_timeout, 120.0))
+        finally:
+            if previous is not None and defaults != previous:
+                try:
+                    self.apply_motion_settings(previous)
+                except Exception as exc:  # noqa: BLE001
+                    self.message_box(
+                        f"ProScan III: {command} ran at the default speed/acceleration/jerk "
+                        f"but they could not be restored ({exc}). The axis is currently on "
+                        f"{HARDWARE_DEFAULT_MOTION_SETTING} for each; set them by hand.",
+                    )
+
+        if previous and defaults != previous:
+            restored = ", ".join(f"{k}={v}" for k, v in previous.items())
+            return (
+                f"\n\nRun at the hardware defaults "
+                f"({HARDWARE_DEFAULT_MOTION_SETTING} speed/accel/jerk); restored {restored}."
+            )
+        return f"\n\nAlready at the hardware defaults ({HARDWARE_DEFAULT_MOTION_SETTING})."
 
     def restore_index_of_stage(self) -> None:
         """Re-synchronise stage and controller position after a manual move (manual 4.3, RIS).
@@ -905,9 +986,8 @@ class Device(EmptyDevice):
             if self.is_axis_moving():
                 self.message_box("ProScan III: the stage is moving; RIS was not sent.")
                 return
-            self._write("RIS")
-            self._wait_for_response("R", timeout=max(self.move_timeout, 120.0))
-            self.message_box("ProScan III: RIS completed.")
+            note = self._home_with_default_motion_settings("RIS", ("X", "Y"))
+            self.message_box(f"ProScan III: RIS completed.{note}")
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: RIS failed: {exc}")
 
@@ -1886,12 +1966,38 @@ class Device(EmptyDevice):
 
     def is_axis_moving(self) -> bool:
         """Return True while this axis is moving (manual 4.2, '$' with an axis argument)."""
-        response = self._query(self.axis_commands["moving"])
+        return self.is_named_axis_moving(self.axis)
+
+    def is_named_axis_moving(self, axis: str) -> bool:
+        """Return True while the given axis is moving, whichever axis the GUI selected.
+
+        Needed because SIS and RIS act on the WHOLE X/Y stage, so waiting for them means
+        waiting for both X and Y regardless of which axis this instance drives.
+        """
+        command = AXIS_TABLE[axis]["moving"]
+        response = self._query(command)
         try:
             return int(response.split(",")[0]) != 0
         except ValueError as exc:
-            msg = f"Invalid '{self.axis_commands['moving']}' response: {response!r}"
+            msg = f"Invalid '{command}' response: {response!r}"
             raise ValueError(msg) from exc
+
+    def wait_until_axes_idle(self, axes: tuple, timeout: float) -> None:
+        """Wait for every named axis to stop moving (manual 4.2, '$').
+
+        Homing needs this for the same reason a move does: on firmware 1.03 'R' comes back
+        in about 20 ms as an acknowledgement, and SIS drives into both hard limits, so
+        waiting only for 'R' returns while the mechanics are still travelling.
+        """
+        deadline = time.time() + timeout
+        while any(self.is_named_axis_moving(axis) for axis in axes):
+            if time.time() > deadline:
+                msg = (
+                    f"The {'/'.join(axes)} axis did not stop within {timeout:g} s. "
+                    "The mechanics may still be moving."
+                )
+                raise TimeoutError(msg)
+            time.sleep(0.05)
 
     def get_limit_switch_latch(self) -> int:
         """Return which limit switches have been hit since the last call (manual 4.2, '=').
@@ -1937,9 +2043,57 @@ class Device(EmptyDevice):
             self.axis_commands["acceleration_command"], setting, "acceleration",
         )
 
-    def _set_axis_setting(self, command: str, setting: int, description: str) -> None:
+    def set_s_curve(self, setting: int) -> None:
+        """Set the S-curve, i.e. the jerk limit, of this axis (SCS for X/Y, SCZ for Z).
+
+        Manual 4.3: "the rate of change of acceleration during the transition from
+        stationary until the stage reaches the full acceleration set by SAS". Prior
+        express it in time rather than units/s³, and **higher means sharper, not
+        smoother**: "at default 100 setting curve time = 13 ms. At 200 curve time =
+        6.5 ms".
+
+        Strictly bounded, unlike speed and acceleration. Manual 4.3 gives SMS and SAS as
+        "Range is 1 to 1000 ... **Higher values are allowed**", but SCS as bare "Range of
+        c is 1 to 1000" with no such note -- and firmware 1.03 rejects `SCS,1500` with
+        `ARG1_OUT_OF_RANGE`. So the axis-wide leniency must not be applied here.
+        """
+        self._set_axis_setting(
+            self.axis_commands["scurve_command"], setting, "S-curve", strict=True,
+        )
+
+    def get_motion_settings(self) -> dict:
+        """Read this axis' speed, acceleration and S-curve (manual 4.3, 4.4).
+
+        Keyed by the command that *sets* each one, so the values can be replayed verbatim:
+        the query and set forms differ only by the appended number.
+        """
+        settings = {}
+        for key in ("speed_command", "acceleration_command", "scurve_command"):
+            command = self.axis_commands[key]
+            response = self._query(command)
+            try:
+                settings[command] = int(response)
+            except ValueError as exc:
+                msg = f"Invalid {command} response from the ProScan III: {response!r}."
+                raise RuntimeError(msg) from exc
+        return settings
+
+    def apply_motion_settings(self, settings: dict) -> None:
+        """Write back a dict from get_motion_settings().
+
+        Sent with _command() rather than the range-checked setters, because these values
+        came off the controller itself -- range-checking a controller's own reading would
+        refuse a legitimate state that someone set through Prior's own software.
+        """
+        for command, value in settings.items():
+            self._command(f"{command},{int(value)}")
+
+    def _set_axis_setting(
+        self, command: str, setting: int, description: str, *, strict: bool | None = None,
+    ) -> None:
         low, high = self.axis_commands["setting_range"]
-        strict = self.axis_commands["strict_setting_range"]
+        if strict is None:
+            strict = self.axis_commands["strict_setting_range"]
 
         if setting < low or (setting > high and strict):
             msg = (
