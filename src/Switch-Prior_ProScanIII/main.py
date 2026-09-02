@@ -507,6 +507,7 @@ class Device(EmptyDevice):
         "zero_this_axis",
         "report_status",
         "run_self_test",
+        "run_self_test_joystick",
         "run_self_test_motion",
         "save_configuration",
     ]
@@ -1004,6 +1005,18 @@ class Device(EmptyDevice):
                     + ("" if fitted else "  -- run_self_test_motion() will refuse"),
                 ))
 
+            joystick, error = self._self_test_attempt(self.get_joystick_status_line)
+            if error:
+                checks.append((None, f"the joystick state could not be read: {error}"))
+            elif "NOT ACTIVE" in joystick.upper():
+                checks.append((
+                    None,
+                    f"{joystick} -- the lockout is on. unconfigure() clears it, so if no run "
+                    "is in progress something left it set.",
+                ))
+            else:
+                checks.append((True, joystick))
+
             scale, error = self._self_test_attempt(self.determine_user_unit_in_microns)
             checks.append(
                 (None, f"the user unit is not determinable: {error}") if error
@@ -1034,8 +1047,92 @@ class Device(EmptyDevice):
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: the read-only self-test stopped with an error: {exc}")
 
+    def run_self_test_joystick(self) -> None:
+        """Tier 2: writes, but moves nothing. Round-trips the joystick lockout.
+
+        Sends H,1 then J -- exactly what configure() and unconfigure() do -- and reads the
+        '?' block after each to confirm the controller actually acted on it. Neither
+        command moves an axis, and the joystick is restored to the state it was found in
+        even if a check fails partway.
+
+        Verified on firmware 1.03: the '?' joystick line reads ACTIVE, and NOT ACTIVE
+        after H,1. Only ACTIVE and NOT FITTED appear in the manual, so NOT ACTIVE is an
+        undocumented but useful third state -- it is the only way to confirm the lockout,
+        since there is no joystick query command.
+
+        It cannot confirm a focus-only lockout: after H,3 ('Z disabled') the line still
+        reads ACTIVE, so it tracks the XY joystick only.
+        """
+        restore_to_enabled = None
+        try:
+            checks: list[tuple[bool | None, str]] = []
+
+            if self.joystick_was_disabled:
+                self.message_box(
+                    "ProScan III self-test tier 2 (joystick): not run -- the driver has the "
+                    "joystick disabled for a run in progress. Toggling it now would unlock "
+                    "the stage mid-measurement.",
+                )
+                return
+
+            initial = self.get_joystick_status_line()
+            if "NOT FITTED" in initial.upper():
+                self.message_box(
+                    f"ProScan III self-test tier 2 (joystick): not run -- '{initial}'. "
+                    "Attach a joystick first.",
+                )
+                return
+            restore_to_enabled = "NOT ACTIVE" not in initial.upper()
+            checks.append((True, f"starting state: {initial}"))
+
+            self.set_joystick_enabled(enabled=False)          # H,1
+            disabled = self.get_joystick_status_line()
+            checks.append((
+                "NOT ACTIVE" in disabled.upper(),
+                f"after H,1 the controller reports: {disabled}",
+            ))
+
+            self.set_joystick_enabled(enabled=True)           # J
+            enabled = self.get_joystick_status_line()
+            checks.append((
+                "NOT ACTIVE" not in enabled.upper() and "NOT FITTED" not in enabled.upper(),
+                f"after J the controller reports: {enabled}",
+            ))
+
+            for command, label in (("O", "stage joystick speed"), ("OF", "focus joystick speed")):
+                value, error = self._self_test_attempt(lambda c=command: self._query(c))
+                checks.append(
+                    (None, f"{label} ({command}) unreadable: {error}") if error
+                    else (True, f"{label} ({command}) = {value}"),
+                )
+            checks.append((
+                None,
+                "O and OF are hot-key-scaled (manual 4.14): a hot key cycles the speed "
+                "100/50/25 %, and the scaled value is what these queries report. That is why "
+                "the configuration capture records them but never replays them -- replaying a "
+                "temporarily halved speed would make the reduction permanent.",
+            ))
+
+            self.message_box(self._format_self_test("self-test tier 2 (joystick)", checks))
+        except Exception as exc:  # noqa: BLE001 - an action must not raise
+            self.message_box(
+                f"ProScan III: the joystick self-test stopped with an error: {exc}",
+            )
+        finally:
+            # Hand the joystick back in the state it was found in, whatever happened above.
+            if restore_to_enabled is not None:
+                try:
+                    self.set_joystick_enabled(enabled=restore_to_enabled)
+                except Exception as exc:  # noqa: BLE001
+                    self.message_box(
+                        f"ProScan III: the joystick could not be restored to "
+                        f"{'enabled' if restore_to_enabled else 'disabled'} ({exc}). Send 'J' "
+                        "by hand, or power-cycle the controller -- the joystick is always "
+                        "enabled on power up (manual 4.3).",
+                    )
+
     def run_self_test_motion(self) -> None:
-        """Tier 2: moves the selected axis 0.5 mm and returns it. Needs the axis fitted.
+        """Tier 3: moves the selected axis 0.5 mm and returns it. Needs the axis fitted.
 
         Refuses, before sending any movement command, if the axis is not fitted, if the
         scale is not determinable, if the axis is already moving, if the controller is in
@@ -1053,7 +1150,7 @@ class Device(EmptyDevice):
             refusal = self._refuse_motion_self_test()
             if refusal:
                 self.message_box(
-                    f"ProScan III self-test tier 2 (motion): not run -- {refusal}",
+                    f"ProScan III self-test tier 3 (motion): not run -- {refusal}",
                 )
                 return
 
@@ -1062,7 +1159,7 @@ class Device(EmptyDevice):
             step_units = int(round(SELF_TEST_MOVE_MICRONS / scale))
             if step_units == 0:
                 self.message_box(
-                    f"ProScan III self-test tier 2 (motion): not run -- one user unit is "
+                    f"ProScan III self-test tier 3 (motion): not run -- one user unit is "
                     f"{scale:.6g} µm, so a {SELF_TEST_MOVE_MICRONS:g} µm move rounds to zero "
                     "steps.",
                 )
@@ -1116,7 +1213,7 @@ class Device(EmptyDevice):
                 "unit above against a dial gauge before recording any data.",
             ))
 
-            self.message_box(self._format_self_test("self-test tier 2 (motion)", checks))
+            self.message_box(self._format_self_test("self-test tier 3 (motion)", checks))
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(
                 f"ProScan III: the motion self-test stopped with an error: {exc} "
@@ -1708,8 +1805,29 @@ class Device(EmptyDevice):
         self._command(f"{command},{setting}")
 
     def set_joystick_enabled(self, *, enabled: bool) -> None:
-        """Enable ('J') or disable ('H,1') joystick control of stage and focus (manual 4.3)."""
+        """Enable ('J') or disable ('H,1') joystick control of stage and focus (manual 4.3).
+
+        Never send a bare 'H'. The manual's argument column for it reads 'None', which
+        looks like a query, but its sub-rows say 'H  Joystick disabled' -- it is a write,
+        and there is no query form for the joystick state at all.
+        """
         self._command("J" if enabled else "H,1")
+
+    def get_joystick_status_line(self) -> str:
+        """Return the '?' line describing the joystick, e.g. 'JOYSTICK ACTIVE' (manual 4.2).
+
+        There is no joystick query command, so this parses the '?' block. Observed on
+        firmware 1.03: 'JOYSTICK ACTIVE', 'JOYSTICK NOT ACTIVE' after H,1, and
+        'JOYSTICK NOT FITTED' with no joystick plugged in. Only the first and last appear
+        in the manual.
+
+        The line tracks the **XY** joystick only: after H,3 ('Z disabled') it still reads
+        ACTIVE, so it cannot verify a focus-only lockout.
+        """
+        for line in self.get_controller_information():
+            if "JOYSTICK" in line.upper():
+                return line.strip()
+        return "no JOYSTICK line in the '?' response"
 
     def get_axis_resolution_in_microns(self) -> float | None:
         """Return the axis resolution in microns from RES, or None if RES is unsupported.

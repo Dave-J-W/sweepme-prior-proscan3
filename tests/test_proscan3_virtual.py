@@ -602,7 +602,7 @@ class NoStageFitted(ProScanIIISimulator):
 
 
 def test_self_tests(driver) -> None:
-    """The two self-test tiers: what tier 1 reports, and what tier 2 refuses to do."""
+    """The three self-test tiers: read-only, the joystick lockout, and the 0.5 mm move."""
     print("\n[31] self-test actions")
 
     def movement_commands(instrument):
@@ -642,7 +642,68 @@ def test_self_tests(driver) -> None:
     )
     check("FAIL" not in report, "an unfitted controller is not reported as a driver failure")
 
-    # --- tier 2 refuses when there is nothing to move
+    # --- tier 2, the joystick lockout round-trip
+    #
+    # "Disable joystick during run: False" so that configure() does not itself take the
+    # lockout. Otherwise the tier's own mid-run guard refuses, and a bare
+    # "FAIL not in report" passes on the refusal without having tested anything.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument, **{"Disable joystick during run": False})
+    device.messages = []
+    device.run_self_test_joystick()
+    report = "\n".join(device.messages)
+    check("checks passed" in report, "the joystick tier actually ran, rather than refusing")
+    check("FAIL" not in report, "the joystick tier passes on a healthy controller")
+    check(
+        "after H,1 the controller reports: JOYSTICK NOT ACTIVE" in report,
+        "the joystick tier confirms the lockout through '?', not by assuming H,1 worked",
+    )
+    check(
+        "after J the controller reports: JOYSTICK ACTIVE" in report,
+        "and confirms the lockout was released",
+    )
+    check(instrument.joystick_enabled, "the joystick is left enabled afterwards")
+    check(not movement_commands(instrument), "the joystick tier sends no movement command")
+
+    # A driver that only sent H,1 and trusted it would pass a weaker test. Prove the
+    # check has teeth: a controller that ignores H,1 must be reported as a failure.
+    class IgnoresLockout(ProScanIIISimulator):
+        """Firmware that acknowledges H,1 with '0' but does not act on it."""
+
+        def _cmd_h(self, arguments):
+            self._ok()
+
+    device = bring_up(driver, IgnoresLockout(), **{"Disable joystick during run": False})
+    device.messages = []
+    device.run_self_test_joystick()
+    report = "\n".join(device.messages)
+    check("FAIL" in report, "a controller that ignores H,1 is reported as a failure")
+
+    # --- the joystick tier refuses mid-run rather than unlocking the stage
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)          # configure() disabled the joystick
+    check(device.joystick_was_disabled, "configure() disabled the joystick for the run")
+    device.messages = []
+    device.run_self_test_joystick()
+    report = "\n".join(device.messages)
+    check("not run" in report, "the joystick tier refuses while a run holds the lockout")
+    check(not instrument.joystick_enabled, "and leaves the run's lockout in place")
+
+    # --- and refuses when no joystick is plugged in
+    class NoJoystick(ProScanIIISimulator):
+        def _cmd_info(self, arguments):
+            self.out.extend(["PROSCAN INFORMATION", "JOYSTICK NOT FITTED", "END"])
+
+    device = make_device(driver, NoJoystick(), **{"Disable joystick during run": False})
+    device.connect()
+    device.initialize()
+    device.messages = []
+    device.run_self_test_joystick()
+    report = "\n".join(device.messages)
+    check("not run" in report, "the joystick tier refuses with no joystick fitted")
+    check("NOT FITTED" in report, "and says so")
+
+    # --- tier 3 refuses when there is nothing to move
     instrument = NoStageFitted()
     device = make_device(driver, instrument)
     device.connect()
@@ -650,11 +711,11 @@ def test_self_tests(driver) -> None:
     device.messages = []
     device.run_self_test_motion()
     report = "\n".join(device.messages)
-    check("not run" in report, "tier 2 refuses when the axis is not fitted")
+    check("not run" in report, "tier 3 refuses when the axis is not fitted")
     check("STAGE = NONE" in report, "and says what it read to decide that")
     check(not movement_commands(instrument), "and sends no movement command when refusing")
 
-    # --- tier 2 refuses when a limit switch is already active
+    # --- tier 3 refuses when a limit switch is already active
     instrument = ProScanIIISimulator()
     device = bring_up(driver, instrument)
     instrument.limit_low["X"] = 0          # the axis sits at 0, so -X reads active
@@ -662,40 +723,40 @@ def test_self_tests(driver) -> None:
     before = len(movement_commands(instrument))
     device.run_self_test_motion()
     report = "\n".join(device.messages)
-    check("not run" in report, "tier 2 refuses when a limit switch is already active")
+    check("not run" in report, "tier 3 refuses when a limit switch is already active")
     check("-X limit switch is already active" in report, "and names the switch")
     check(
         len(movement_commands(instrument)) == before,
         "and sends no movement command when refusing on a limit",
     )
 
-    # --- tier 2 on a healthy controller: out 0.5 mm, then back
+    # --- tier 3 on a healthy controller: out 0.5 mm, then back
     instrument = ProScanIIISimulator()
     device = bring_up(driver, instrument)
     instrument.position_microsteps["X"] = 10_000 * 25
     device.messages = []
     device.run_self_test_motion()
     report = "\n".join(device.messages)
-    check("out leg reached" in report, "tier 2 reports the outward leg")
-    check("back leg reached" in report, "tier 2 reports the return leg")
-    check("FAIL" not in report, "tier 2 passes on a healthy controller")
+    check("out leg reached" in report, "tier 3 reports the outward leg")
+    check("back leg reached" in report, "tier 3 reports the return leg")
+    check("FAIL" not in report, "tier 3 passes on a healthy controller")
     check(
         instrument.position_in_user_units("X") == 10_000,
-        f"tier 2 leaves the axis where it started, got "
+        f"tier 3 leaves the axis where it started, got "
         f"{instrument.position_in_user_units('X')}",
     )
     targets = [command for command in instrument.log if command.upper().startswith("GX,")]
     check(
         targets == ["GX,10500", "GX,10000"],
-        f"tier 2 moves exactly 500 µm out and back, sent {targets}",
+        f"tier 3 moves exactly 500 µm out and back, sent {targets}",
     )
     check(
         not instrument.commands_matching("Z"),
-        "tier 2 never sends the destructive bare 'Z'",
+        "tier 3 never sends the destructive bare 'Z'",
     )
     check(
         not instrument.commands_matching("SIS") and not instrument.commands_matching("RIS"),
-        "tier 2 never homes",
+        "tier 3 never homes",
     )
 
     # --- a limit hit mid-test stops it, and it does not move again

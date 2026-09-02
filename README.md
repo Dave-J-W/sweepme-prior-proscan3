@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 216 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 229 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -55,7 +55,8 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 | `zero_this_axis` | Sets this axis' position counter to zero without moving. Uses `PX`/`PY`/`PZ`, not the bare `Z` command, which would zero all three axes and clear the software limits |
 | `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT`. Each line is read independently, so one unreadable value does not take the whole report down |
 | `run_self_test` | **Tier 1, read-only.** Moves nothing and needs nothing fitted. Checks firmware, that the two-line `DATE` was drained, standard command mode, the serial number, what is fitted, both limit-switch number bases, the scaling, and that a rejection still decodes to a documented name. Anything unfitted or unreadable is reported as a note, not a failure |
-| `run_self_test_motion` | **Tier 2, moves the selected axis 500 µm and back.** Needs 0.5 mm of clear travel in the positive direction. Refuses before sending any movement command if the axis is not fitted, the scale is unknown, the axis is already moving, the controller is in compatibility mode, or a limit switch is already active. If it hits a limit mid-test it stops there and does not move again |
+| `run_self_test_joystick` | **Tier 2, writes but moves nothing.** Round-trips the joystick lockout: sends `H,1` then `J`, and reads the `?` block after each to confirm the controller acted, rather than trusting the acknowledgement. Restores the joystick to the state it was found in even if a check fails. Refuses if no joystick is fitted, or while a run holds the lockout |
+| `run_self_test_motion` | **Tier 3, moves the selected axis 500 µm and back.** Needs 0.5 mm of clear travel in the positive direction. Refuses before sending any movement command if the axis is not fitted, the scale is unknown, the axis is already moving, the controller is in compatibility mode, or a limit switch is already active. If it hits a limit mid-test it stops there and does not move again |
 | `save_configuration` | Read-only. Captures the controller's current settings for both the stage and the focus axis into the file named in **Save configuration as**, and reports the path |
 
 ## Saved configurations
@@ -130,7 +131,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 216/216
+python tests/test_proscan3_virtual.py     # expect 229/229
 ruff check src tests
 ```
 
@@ -148,7 +149,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 216 checks covering the translation sequence, all three axes,
+No hardware needed. 229 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,

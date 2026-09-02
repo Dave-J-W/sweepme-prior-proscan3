@@ -191,6 +191,34 @@ hardware rather than by inspection.
    with an unread response pending; the driver's `_query` raises on an empty read, which
    is the safe outcome, but anything that swallows that would desynchronise.
 
+## The joystick, confirmed against hardware
+
+A joystick was attached after a power cycle, which made the lockout path testable for the
+first time. Manual 4.3 for `H`/`J`, 4.14 for the hot keys.
+
+| Observation | Detail |
+|---|---|
+| `?` gains a **third** joystick state | `JOYSTICK ACTIVE`, `JOYSTICK NOT ACTIVE` after `H,1`, `JOYSTICK NOT FITTED` with none attached. **Only the first and last are in the manual.** |
+| That line is the **only** way to verify the lockout | There is no joystick query command at all, so `get_joystick_status_line()` parses `?`. The driver used to send `H,1` and trust it. |
+| The line tracks the **XY** joystick only | After `H,2` ("XY disabled") it reads `NOT ACTIVE`; after `H,3` ("Z disabled") it still reads `ACTIVE`. A focus-only lockout is invisible here. |
+| A failed `configure()` leaves the joystick alone | `configure()` determines the scale before it reaches `H,1`, so on a bare controller it raises first. Confirmed: `JOYSTICK ACTIVE` and `joystick_was_disabled` still `False` afterwards. |
+| Attaching a joystick changed no stored setting | `O` 100, `OF` 100, `JXD` −1, `JYD` −1, `JZD` 1 — identical before and after. |
+
+Two commands that look safe and are not:
+
+- **Bare `H` is a write, not a query.** Its argument column reads `None`, which is the
+  shape of a query elsewhere in the manual, but the sub-rows say `H  Joystick disabled`.
+  Sending it to "read the joystick state" disables the joystick. Use `?`.
+- **`BUTTON b,f` is write-only and persistent.** It *reprograms* what a joystick button
+  does (manual 4.14); there is no read form, so button presses cannot be observed at all.
+  The hot keys are observable only indirectly, through the value `O`/`OF` report.
+
+The manual also confirms the `O`/`OF` hot-key quirk that
+`docs/configuration-capture.md` refuses to replay: a hot key cycles the joystick speed
+100 % → 50 % → 25 % → 100 %, and the *scaled* value is what the query returns. **That
+cycle has not yet been observed on hardware** — it needs someone at the bench pressing the
+key while the value is polled.
+
 **Firmware 1.03 does not implement the software-limit query family at all.** All of
 `UNTLIMIT,?`, `CHKLIMITR`, `CHKLIMITA`, `ACTLIMITR,?` and `ACTLIMITA,?` — rows 5 to 9 of
 the reference block above — answer `COMMAND_NOT_FOUND (E,5)`. `SWLL` and `SWLH` answer

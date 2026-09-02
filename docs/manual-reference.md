@@ -120,3 +120,11 @@ failing these checks.
 
 `ZA` (Appendix F) zeroes the fourth axis, so it belongs with the bare `Z` prohibition in
 `CLAUDE.md`, not with the harmless queries.
+
+Worse than a comma, two commands whose *bare* form is a destructive write:
+
+- **`H`** — argument column `None`, which is the shape of a query everywhere else, but the
+  sub-rows read `H  Joystick disabled`. There is no joystick query command; read the
+  `JOYSTICK` line out of `?` instead (manual 4.3).
+- **`BUTTON b,f`** — write-only and persistent, it reprograms a joystick button. No read
+  form exists, so button presses cannot be observed directly at all (manual 4.14).

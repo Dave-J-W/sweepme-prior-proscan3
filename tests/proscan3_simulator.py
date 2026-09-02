@@ -79,6 +79,9 @@ class ProScanIIISimulator:
         # one 'I' answers with. The manual does not say, so the driver must survive both.
         self.extra_r_after_stop = extra_r_after_stop
         self.joystick_enabled = True
+        # Tracked separately because '?' reports the XY joystick only: H,3 disables Z
+        # while the '?' line still reads ACTIVE (observed on firmware 1.03).
+        self.joystick_xy_enabled = True
         self.stall_forever = stall_forever
 
         # Injected fault: the axis lands this many user units away from the target.
@@ -376,7 +379,12 @@ class ProScanIIISimulator:
                 "PROSCAN INFORMATION",
                 "DSP_1 IS 3-AXIS STEPPER VERSION 0.0",
                 "DRIVE CHIPS 111111",
-                "JOYSTICK ACTIVE" if self.joystick_enabled else "JOYSTICK INACTIVE",
+                # Observed on firmware 1.03, and it is NOT the 'INACTIVE' this simulator
+                # used to guess: the controller answers 'JOYSTICK NOT ACTIVE'. Only
+                # ACTIVE and NOT FITTED appear in the manual. The line tracks the XY
+                # joystick only -- after H,3 ('Z disabled') the real controller still
+                # reports ACTIVE.
+                "JOYSTICK ACTIVE" if self.joystick_xy_enabled else "JOYSTICK NOT ACTIVE",
                 "STAGE = H101/2",
                 "FOCUS = OPENSTAND",
                 "HARDWARE REV F",
@@ -388,11 +396,18 @@ class ProScanIIISimulator:
         self.out.extend(["NONE", "END"])
 
     def _cmd_h(self, arguments: list[str]) -> None:
-        self.joystick_enabled = arguments == ["0"]
+        # Manual 4.3: bare H disables, H,0 enables, H,1 disables, H,2 disables XY only,
+        # H,3 disables Z only. Note that bare H is a WRITE despite the manual's argument
+        # column reading 'None'.
+        argument = arguments[0] if arguments else ""
+        self.joystick_enabled = argument == "0"
+        # '?' reports the XY joystick, which H,3 leaves alone (observed on firmware 1.03).
+        self.joystick_xy_enabled = argument in ("0", "3")
         self._ok()
 
     def _cmd_j(self, arguments: list[str]) -> None:
         self.joystick_enabled = True
+        self.joystick_xy_enabled = True
         self._ok()
 
     # -------------------------------------------------------- stage commands

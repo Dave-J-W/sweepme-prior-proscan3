@@ -7,10 +7,10 @@ feature).
 ## Where the work stands
 
 Implemented and verified against the simulator. **Communication, every read-only query,
-error decoding and the configuration capture have now been run against a real
-controller**; nothing that moves an axis has, because the controller available has no
-stage, focus or joystick fitted. See "What the bench controller settled" below for what
-that does and does not license.
+error decoding, the configuration capture and the joystick lockout have now been run
+against a real controller**; nothing that moves an axis has, because the controller
+available has a joystick but no stage and no focus axis. See "What the bench controller
+settled" below for what that does and does not license.
 
 | Capability | State |
 |---|---|
@@ -27,11 +27,13 @@ that does and does not license.
 | Compatibility-mode recovery (`COMP,0`) | done |
 | Homing and zeroing as action buttons | done |
 | Read-only status diagnostic | done |
-| Read-only self-test (tier 1) | done, **9/9 on hardware**, X and Z |
-| Motion self-test, ±500 µm (tier 2) | written; **its refusals are verified on hardware, the move itself is not** |
+| Read-only self-test (tier 1) | done, **10/10 on hardware**, X, Y and Z |
+| Joystick lockout self-test (tier 2) | done, **5/5 on hardware** with a joystick attached |
+| Motion self-test, ±500 µm (tier 3) | written; **its refusals are verified on hardware, the move itself is not** |
+| Joystick lockout during a run, verified through `?` | done, and confirmed on hardware |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **216/216**, exit 0, across 31 sections.
+`python tests/test_proscan3_virtual.py` → **229/229**, exit 0, across 31 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -40,18 +42,22 @@ Sections 1–20 cover motion, scaling, error handling and the failure paths; 21�
 the configuration capture, including that it sends queries and nothing else, that the
 hot-key-scaled `O`/`OF` values are recorded but never replayed, that `UPR,Z` is restored
 before the focus scaling that depends on it, and that a saved name cannot escape the
-configuration folder. Section 31 covers the two self-test tiers: that tier 1 sends no
-movement command and demotes an unfitted axis to a note rather than a failure, and that
-tier 2 refuses on an unfitted axis or an already-active limit switch, moves exactly
-±500 µm, returns the axis to where it started, and stops without a second move if it hits
-a limit.
+configuration folder. Section 31 covers the three self-test tiers: that tier 1 sends no
+movement command and demotes an unfitted axis to a note rather than a failure; that
+tier 2 confirms the joystick lockout through `?` instead of trusting the acknowledgement,
+fails against firmware that ignores `H,1`, restores the joystick, and refuses while a run
+holds the lockout; and that tier 3 refuses on an unfitted axis or an already-active limit
+switch, moves exactly ±500 µm, returns the axis to where it started, and stops without a
+second move if it hits a limit.
 
 ## What the bench controller settled
 
 Run 2026-09-02 against a **ProScan H31XYZ, firmware `VERSION` 103** (1.03, compiled
 Nov 2017, HARDWARE REV F, 3-axis stepper, `DRIVE CHIPS 000111`) on an FTDI USB virtual
-COM port at 9600 baud. `?` reports `STAGE = NONE`, `FOCUS = NONE`,
-`JOYSTICK NOT FITTED` — the controller is bare.
+COM port at 9600 baud. In this first session `?` reported `STAGE = NONE`, `FOCUS = NONE`
+and `JOYSTICK NOT FITTED` — the controller was completely bare. A joystick was attached
+later the same day; see "The joystick session" below. The stage and focus axis are still
+absent.
 
 Confirmed working on hardware: `connect()` including the `ERROR,0`-first ordering,
 `VERSION`, the two-line `DATE` drain, `COMP`, `initialize()`, the `?` controller block,
@@ -99,6 +105,27 @@ What the bare controller taught us:
 Also worth knowing before the next hardware session: with no stage wired, `LMT` answers
 `0F`, so **all four X/Y limit switches read as active**. Any move attempt on a bare
 controller will look like a limit hit.
+
+### The joystick session
+
+A joystick was attached after a power cycle. Tier 1 held at its baseline across the power
+cycle — 9/9 then, on all three axes — which is the first regression check this driver has
+had against a real controller.
+
+The lockout is now **verified rather than trusted**. `?` turns out to carry an undocumented
+third joystick state, `JOYSTICK NOT ACTIVE`, and since there is no joystick query command
+that line is the only way to confirm `H,1` took effect. The simulator had guessed
+`JOYSTICK INACTIVE`; it now matches the controller. Details, including that the line
+tracks the XY joystick only and that bare `H` is a write rather than a query, are in
+`docs/command-map.md`, "The joystick, confirmed against hardware".
+
+**Still not observed:** the `O`/`OF` hot-key cycle. An interactive test is built —
+`hw_watch.py` in the scratchpad polls `P`, `$`, `LMT`, `O` and `OF` at about 7 Hz and
+reports only changes, against a baseline of 59 samples with zero changes — but it needs an
+operator at the bench pressing the key inside the window. Two windows were run without a
+confirmed operator action and were silent; **that silence is not evidence about the
+controller** and should not be recorded as such. Joystick *deflection* with no stage
+fitted is likewise still an open question.
 
 ## The next thing to do
 
@@ -175,7 +202,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 216 checks:
+Honest limits of the 229 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`
