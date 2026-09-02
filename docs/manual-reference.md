@@ -121,6 +121,18 @@ failing these checks.
 `ZA` (Appendix F) zeroes the fourth axis, so it belongs with the bare `Z` prohibition in
 `CLAUDE.md`, not with the harmless queries.
 
+`TTL` (4.19) is the sharpest of these, because the safe and the destructive form differ by
+a single `?`:
+
+| Query | Destructive |
+|---|---|
+| `TTL` bare → `DCBA` | — |
+| `TTL,n,?` → the level of bit n | `TTL,n,m` **sets** bit n to level m |
+| — | **`TTL,2` writes `0x02` to the outputs.** The manual: "it is important not to omit m or it will be assumed by the controller that n is a Hexadecimal number" |
+
+So the natural-looking `TTL,2` — which reads like "give me bit 2" — asserts an output
+line. Where those outputs gate a camera, a shutter or a laser, that typo fires it.
+
 Worse than a comma, two commands whose *bare* form is a destructive write:
 
 - **`H`** — argument column `None`, which is the shape of a query everywhere else, but the

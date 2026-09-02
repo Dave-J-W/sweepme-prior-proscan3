@@ -119,13 +119,32 @@ that line is the only way to confirm `H,1` took effect. The simulator had guesse
 tracks the XY joystick only and that bare `H` is a write rather than a query, are in
 `docs/command-map.md`, "The joystick, confirmed against hardware".
 
-**Still not observed:** the `O`/`OF` hot-key cycle. An interactive test is built —
-`hw_watch.py` in the scratchpad polls `P`, `$`, `LMT`, `O` and `OF` at about 7 Hz and
-reports only changes, against a baseline of 59 samples with zero changes — but it needs an
-operator at the bench pressing the key inside the window. Two windows were run without a
-confirmed operator action and were silent; **that silence is not evidence about the
-controller** and should not be recorded as such. Joystick *deflection* with no stage
-fitted is likewise still an open question.
+The joystick is a **PS3J100/D Interactive Control Centre**, and identifying it resolved
+what had looked like three null results. Manual 4.14 says its commands "are only
+applicable to CS152 Joysticks and not for the PS3J100", so:
+
+- **The `O`/`OF` hot-key cycle does not apply to this unit**, and `O`/`OF` holding at 100
+  through hot-key presses is correct rather than a failure. The 100/50/25 % scaling that
+  `docs/configuration-capture.md` refuses to replay is a CS152/CS200 property and is
+  **still unobserved on hardware** — it needs a CS152-series joystick. The reason for not
+  replaying those values is unaffected.
+- **Joystick deflection and the focus digipot change nothing observable** with no motors
+  fitted: an operator-confirmed 180 s window, 1 304 samples, no change in `P`, `$`, `LMT`,
+  `O` or `OF`. So the joystick cannot be used to check wiring before a stage arrives.
+
+**Button presses, though, are observable — and a claim in this repo was wrong about that.**
+It previously said presses "cannot be observed at all", reasoning from `BUTTON` being
+write-only in 4.14 without having read 4.17 or 4.19. A PS3J100 button routed to a TTL line
+from the joystick's own menu shows up in the controller's TTL port: with the **top-right
+button on TTL2 / High**, `TTL` moved `4` ↔ `6` with 7–10 s dwells, latching rather than
+momentary. Full results, including that the menu's "TTL2" is really `TTL_OUT 1` and that
+`TRIGGER = NONE` does not mean the TTL port is absent, are in `docs/command-map.md`,
+"Joystick buttons are observable, through the TTL port".
+
+The scratchpad tooling for this: `hw_watch.py` polls `P`, `$`, `LMT`, `O`, `OF` at ~7 Hz
+and reports only changes; `hw_ttl_out.py` polls `TTL` and `LTTL` at ~18 Hz. Both print
+with `flush=True` — **do not pipe them through `sed` or `grep` when backgrounding them**,
+because both stages block-buffer and the log then stays invisible until the process exits.
 
 ## The next thing to do
 
@@ -153,7 +172,7 @@ up is a short job.
 | Constant-velocity moves (`VS`, `VZ`) | 4.3, 4.4 | For scanning at fixed speed rather than point-to-point |
 | *Setting* software limits (`XLIMITA`/`XLIMITR`/`SWLL`/`SWLH`/`ACTLIMIT*`) | 4.3 | Worth adding as a safety envelope. Currently read as reference data only. Note they interfere with `SIS`/`RIS` — **and that firmware 1.03 rejects the whole query family with `E,5`, so on that firmware a limits feature could not read back what it set** |
 | Stage mapping and patterns | 4.9, 4.10 | Controller-side scan patterns |
-| TTL triggering, trigger board, encoders | 4.16–4.21 | The obvious pairing with a photon counter — a TTL pulse on move completion |
+| TTL triggering, trigger board, encoders | 4.16–4.21 | The obvious pairing with a photon counter — a TTL pulse on move completion. **The hardware is already there**: the four-in/four-out TTL port on the K2 header is built in and answers `TTL`/`LTTL` on firmware 1.03, despite `?` reporting `TRIGGER = NONE` (that names only the 4.16 add-on board). Read forms are `TTL` bare and `TTL,n,?`; note `TTL,n` without a level is a *write* |
 | `OEM` per-axis commands, including `OEM,n,HOME` | 4.11 | Direct axis control that bypasses the stage abstraction |
 | Fourth axis | Appendix F | `SMA`, `SAA`, `PA`, `GA`, `CW`/`ACW` |
 | Filter wheels, shutters, LEDs, nosepiece, Lumen | 4.5–4.8, 4.12 | Separate `Switch` drivers, sharing the port via `self.device_communication` |

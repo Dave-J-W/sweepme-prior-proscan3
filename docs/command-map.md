@@ -210,14 +210,57 @@ Two commands that look safe and are not:
   shape of a query elsewhere in the manual, but the sub-rows say `H  Joystick disabled`.
   Sending it to "read the joystick state" disables the joystick. Use `?`.
 - **`BUTTON b,f` is write-only and persistent.** It *reprograms* what a joystick button
-  does (manual 4.14); there is no read form, so button presses cannot be observed at all.
-  The hot keys are observable only indirectly, through the value `O`/`OF` report.
+  does (manual 4.14), and there is no read form for the binding. It is also CS152-only.
+  Button *presses*, however, are observable — through the TTL port, see below.
 
-The manual also confirms the `O`/`OF` hot-key quirk that
-`docs/configuration-capture.md` refuses to replay: a hot key cycles the joystick speed
-100 % → 50 % → 25 % → 100 %, and the *scaled* value is what the query returns. **That
-cycle has not yet been observed on hardware** — it needs someone at the bench pressing the
-key while the value is polled.
+### The joystick is a PS3J100/D, which changes what applies
+
+The unit on the bench is a **PS3J100/D Interactive Control Centre**. Manual 4.14 opens by
+saying its commands "are only applicable to CS152 Joysticks and **not** for the PS3J100
+Interactive Control Centre", and that turns out to matter:
+
+- **The `O`/`OF` hot-key cycle does not apply to this joystick.** With an operator
+  confirming the actions, three windows totalling over 2 100 samples saw `O` and `OF` hold
+  at 100 through hot-key presses. On a PS3J100 that is expected behaviour, not a null
+  result. The 100/50/25 % cycle in `docs/configuration-capture.md` is a CS152/CS200
+  property and **remains unobserved on hardware** — it needs a CS152-series joystick, not
+  another attempt with this one. The reason the capture refuses to replay `O`/`OF` stands
+  regardless; it just has not been demonstrated here.
+- **Joystick deflection and the focus digipot produce no observable change** with no stage
+  and no focus motor fitted. An operator-paced 180 s window, 1 304 samples, saw no change
+  in `P`, `$`, `LMT`, `O` or `OF`. Nothing to drive, and no command reports a raw joystick
+  axis, so the joystick cannot be used to sanity-check wiring before a stage is attached.
+- `OEM n,VDR,g` (4.11) assigns the PS3J100's right-hand digipot, so that is the command
+  family to look at if digipot control is ever wanted.
+
+### Joystick buttons are observable, through the TTL port
+
+Manual 4.17 and 4.19. A PS3J100 user button can be routed to a TTL line from the
+joystick's own settings menu ("TTL2, Pulse or High"), and the controller's TTL port can
+then be read back. Observed with the **top-right button set to TTL2 / High**:
+
+| Command | Answer | Meaning |
+|---|---|---|
+| `TTL` (bare) | `4` at rest, `6` with the button latched | `DCBA`; `A` is the four `TTL_OUT` bits. **Leading zeros are omitted** — parse it as variable-width hex, never a fixed four characters |
+| `TTL,2,?` | `1` | `TTL_OUT 2` is high at rest and stayed high across ~1 400 samples in two windows. A standing state, unexplained, unrelated to the button |
+| `TTL,1,?` | `0` → `1` on press | **the bit the button drives** |
+| `TTL,8..11,?` | `0` | the four `TTL_IN` bits, all idle. `TTL_IN` is addressed as n=8..11 for H129 compatibility |
+| `LTTL` | `0,0` throughout, 702 calls | correct, not a miss: it latches **input** transitions, and this is an output |
+
+Three findings worth keeping:
+
+1. **The menu's "TTL2" is `TTL_OUT 1`, not `TTL_OUT 2`.** The joystick menu labels appear
+   to be 1-indexed against the controller's 0-indexed `TTL_OUT` pins. `0x4` → `0x6` is
+   bit 1 changing; bit 2 never moved. Confirmed twice, in Pulse mode (12 transitions) and
+   in High mode (3 transitions with 7–10 s dwells).
+2. **In High mode the button latches, it is not momentary.** Press for high, press again
+   for low. In Pulse mode the dwells were as short as 0.06 s, so a pulse can easily fall
+   between polls — `LTTL` would catch it only if the signal were wired to an *input*.
+3. **`TRIGGER = NONE` does not mean there is no TTL port.** `LTTL`, bare `TTL` and
+   `TTL,n,?` all answer on firmware 1.03 rather than rejecting with `E,5`. `TRIGGER` in
+   `?` refers to the *add-on trigger board* of 4.16; the four-in, four-out TTL port on the
+   10-way K2 header is built in. So the out-of-scope idea of a TTL pulse on move
+   completion needs no extra hardware on this controller.
 
 **Firmware 1.03 does not implement the software-limit query family at all.** All of
 `UNTLIMIT,?`, `CHKLIMITR`, `CHKLIMITA`, `ACTLIMITR,?` and `ACTLIMITA,?` — rows 5 to 9 of
