@@ -1,0 +1,9 @@
+# Normalise line endings so a checkout on a second Windows machine does not show
+# every file as modified. If a diff ever looks like that, run: git add --renormalize .
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+
+*.pdf  binary

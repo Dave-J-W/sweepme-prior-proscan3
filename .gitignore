@@ -7,3 +7,13 @@ venv/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# Per-machine Claude Code / Cowork state
+.claude/settings.local.json
+
+# The Prior manual is copyright Prior Scientific and is not redistributed here.
+# See docs/manual-reference.md. Keep a local copy if you like; it will not be committed.
+ProScanIII*.pdf
+ProScan*Manual*.pdf
+manual.txt
+manual.pdf

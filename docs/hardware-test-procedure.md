@@ -112,6 +112,52 @@ Set `Speed (empty = unchanged)` and re-run step 6. Confirm the axis is visibly s
 faster and that positions are unchanged. Out-of-range values must raise before anything is
 sent (1–1000 for X/Y, 1–100 for Z).
 
+## 7a. Configuration capture
+
+Read-only, so it is safe to do at any point after step 2.
+
+```python
+stage.save_configuration_name = "bench-check"
+stage.save_configuration()               # reports the path it wrote
+```
+
+Open the file and check it against the controller's own front panel or Prior Terminal:
+
+| Check | Expect |
+|---|---|
+| `reference.controller_serial` | matches the sticker on the controller |
+| `stage.max_speed`, `stage.acceleration` | match what `SMS` and `SAS` report in Prior Terminal |
+| `focus.*` keys | present if a focus axis is fitted; empty with `NOT AVAILABLE: ... NO_FOCUS` if not |
+| `stage.move_x_direction`, `move_y_direction` | **empty** — the manual gives no way to read `XD`/`YD` |
+| `reference.stage_joystick_speed` | may be 50 % or 25 % of the real setting if a joystick hot key has been pressed; this is the documented behaviour of `O`, not a bug |
+
+Then confirm nothing was written to the controller: `stage.port.log` (or a serial monitor)
+must contain only bare queries — no command in the capture should have a value after a
+comma, other than the axis selectors `RES,S`, `RES,Z`, `UPR,Z`, `CURRENT,1..3`,
+`UNTLIMIT,?`, `ACTLIMITR,?` and `ACTLIMITA,?`.
+
+Now apply it. Change the speed on the controller by hand first, so the restore is visible:
+
+```python
+stage.apply_configuration("bench-check")
+```
+
+Re-read `SMS` and confirm it is back to the captured value. Then re-run step 6 and confirm
+positions are unchanged.
+
+Finally, verify the guards:
+
+| Provoke | Expect |
+|---|---|
+| Edit `focus.max_speed` to `500` | `ValueError` about the documented range, nothing sent |
+| Edit `stage.joystick_x_direction` to `0` | `ValueError` naming the allowed values |
+| Blank a value out | that setting is skipped, the others still applied |
+| Delete the file, then start a run with it still selected | the run fails in `configure()` with the path in the message |
+| Apply a file captured from a different controller | a warning naming both serial numbers, then it proceeds |
+
+If you use software limits, check them before and after an apply with `CHKLIMITR` and
+`ACTLIMITR,?` — the driver must leave both exactly as it found them.
+
 ## 8. Deliberate failures
 
 Each of these must fail clearly rather than record a plausible number.

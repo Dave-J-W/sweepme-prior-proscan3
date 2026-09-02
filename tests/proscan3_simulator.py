@@ -19,6 +19,13 @@ Faithfulness rules it enforces, all from the ProScan III manual
 * Moves are clamped by the hard limit switches, which sets the corresponding latch bit.
 * Standard mode must be selected with ``COMP,0``; the controller may boot in compatibility
   mode (4.2).
+* ``O`` and ``OF`` report the joystick speed *scaled by the hot-key state*, so a controller
+  whose speed button has been pressed reports 50% or 25% of the value that was set
+  (4.3 O, 4.4 OF, 4.14). Modelled with ``hot_key_fraction``.
+* ``XD`` and ``YD`` can be set but the manual documents no query form, so the simulator
+  rejects a bare ``XD``/``YD`` the same way the controller rejects an unknown command.
+* Commands listed in ``unsupported_commands`` answer ``E,5`` (COMMAND_NOT_FOUND), which is
+  how a controller on older firmware, or one without a focus axis, behaves.
 """
 
 from __future__ import annotations
@@ -57,6 +64,9 @@ class ProScanIIISimulator:
         microsteps_per_second: float = 2.0e6,
         position_error_user_units: int = 0,
         stall_forever: bool = False,
+        hot_key_fraction: float = 1.0,
+        unsupported_commands: set[str] | None = None,
+        serial_number: str = "123456",
     ) -> None:
         self.log: list[str] = []
         self.out: list[str] = []
@@ -95,6 +105,41 @@ class ProScanIIISimulator:
 
         self.max_speed = {"X": 100, "Y": 100, "Z": 100}
         self.acceleration = {"X": 100, "Y": 100, "Z": 100}
+        self.s_curve = {"X": 100, "Y": 100, "Z": 100}
+
+        self.serial_number = serial_number
+        self.unsupported_commands = {name.upper() for name in (unsupported_commands or set())}
+
+        # Manual 4.3/4.4: backlash is reported as 's,b' - enable flag and microsteps.
+        self.backlash = {
+            "BLSH": (0, 200),
+            "BLSJ": (0, 100),
+            "BLZH": (1, 300),
+            "BLZJ": (0, 50),
+        }
+
+        # Manual 4.3/4.4: axis directions. JXD/JYD/JZD and ZD are readable; XD and YD are
+        # documented as set-only, so no query handler exists for them.
+        self.joystick_direction = {"JXD": 1, "JYD": -1, "JZD": 1}
+        self.serial_z_direction = 1
+        self.move_direction = {"XD": 1, "YD": 1}
+
+        # Manual 4.3, X: step size for the B/L/R/F moves. Manual 4.4, C: the same for Z.
+        self.stage_step_size = (1000, 1000)
+        self.focus_step_size = 100
+
+        # Manual 4.3 O / 4.4 OF: the percentage that was set, and the hot-key scaling that
+        # the reported value carries but the stored setting does not (manual 4.14).
+        self.joystick_speed = {"O": 80, "OF": 60}
+        self.hot_key_fraction = hot_key_fraction
+
+        self.skew_angle = "0.0"
+        self.limit_units = 0
+        self.software_limits = {"R": "N,N,N,N", "A": "N,N,N,N"}
+        self.limits_active = {"R": 0, "A": 0}
+        # Manual 4.3, CURRENT: 'running,standby,timeout' per axis, keyed 1/2/3 = X/Y/Z.
+        self.drive_current = {"1": "1000,500,500", "2": "1000,500,500", "3": "800,400,500"}
+        self.zplane_enabled = 0
 
         self.limit_latch = 0
         self.move_queue: list[tuple[str, int]] = []
@@ -220,6 +265,10 @@ class ProScanIIISimulator:
         name = tokens[0].upper()
         arguments = tokens[1:]
 
+        if name in self.unsupported_commands:
+            self._error(5)  # COMMAND_NOT_FOUND, as on firmware without this command
+            return
+
         handler = getattr(self, f"_cmd_{self._method_name(name)}", None)
         if handler is None:
             self._error(5)  # COMMAND_NOT_FOUND
@@ -258,7 +307,7 @@ class ProScanIIISimulator:
         )
 
     def _cmd_serial(self, arguments: list[str]) -> None:
-        self.out.append("123456")
+        self.out.append(self.serial_number)
 
     def _cmd_comp(self, arguments: list[str]) -> None:
         if not arguments:
@@ -546,6 +595,253 @@ class ProScanIIISimulator:
             return
         for axis in axes:
             store[axis] = value
+        self._ok()
+
+    def _cmd_scs(self, arguments: list[str]) -> None:
+        # Manual 4.3: "Range of c is 1 to 1000", with no allowance for higher values.
+        self._speed_command(("X", "Y"), self.s_curve, arguments, 1, 1000)
+
+    def _cmd_scz(self, arguments: list[str]) -> None:
+        self._speed_command(("Z",), self.s_curve, arguments, 1, 100)
+
+    # ----------------------------------------------- backlash, directions, steps
+
+    def _cmd_blsh(self, arguments: list[str]) -> None:
+        self._backlash_command("BLSH", arguments)
+
+    def _cmd_blsj(self, arguments: list[str]) -> None:
+        self._backlash_command("BLSJ", arguments)
+
+    def _cmd_blzh(self, arguments: list[str]) -> None:
+        self._backlash_command("BLZH", arguments)
+
+    def _cmd_blzj(self, arguments: list[str]) -> None:
+        self._backlash_command("BLZJ", arguments)
+
+    def _backlash_command(self, name: str, arguments: list[str]) -> None:
+        """Manual 4.3/4.4: 'None' reports 's,b'; 's' or 's,b' sets it and answers '0'."""
+        if not arguments:
+            enabled, microsteps = self.backlash[name]
+            self.out.append(f"{enabled},{microsteps}")
+            return
+        try:
+            enabled = int(arguments[0])
+            microsteps = int(arguments[1]) if len(arguments) > 1 else self.backlash[name][1]
+        except ValueError:
+            self._error(4)
+            return
+        if enabled not in (0, 1):
+            self._error(10)
+            return
+        self.backlash[name] = (enabled, microsteps)
+        self._ok()
+
+    def _cmd_jxd(self, arguments: list[str]) -> None:
+        self._direction_command("JXD", arguments)
+
+    def _cmd_jyd(self, arguments: list[str]) -> None:
+        self._direction_command("JYD", arguments)
+
+    def _cmd_jzd(self, arguments: list[str]) -> None:
+        self._direction_command("JZD", arguments)
+
+    def _direction_command(self, name: str, arguments: list[str]) -> None:
+        if not arguments:
+            self.out.append(str(self.joystick_direction[name]))
+            return
+        value = self._parse_direction(arguments[0])
+        if value is None:
+            return
+        self.joystick_direction[name] = value
+        self._ok()
+
+    def _cmd_zd(self, arguments: list[str]) -> None:
+        # Manual 4.4: unlike XD/YD, ZD has a documented query form returning d.
+        if not arguments:
+            self.out.append(str(self.serial_z_direction))
+            return
+        value = self._parse_direction(arguments[0])
+        if value is None:
+            return
+        self.serial_z_direction = value
+        self._ok()
+
+    def _cmd_xd(self, arguments: list[str]) -> None:
+        self._move_direction_command("XD", arguments)
+
+    def _cmd_yd(self, arguments: list[str]) -> None:
+        self._move_direction_command("YD", arguments)
+
+    def _move_direction_command(self, name: str, arguments: list[str]) -> None:
+        """Manual 4.3 documents XD and YD with an argument only, never as a query."""
+        if not arguments:
+            self._error(4)  # STRING_PARSE: there is no documented query form
+            return
+        value = self._parse_direction(arguments[0])
+        if value is None:
+            return
+        self.move_direction[name] = value
+        self._ok()
+
+    def _parse_direction(self, token: str) -> int | None:
+        """Manual 4.3/4.4: a direction is 1 or -1. Anything else is out of range."""
+        try:
+            value = int(token)
+        except ValueError:
+            self._error(4)
+            return None
+        if value not in (-1, 1):
+            self._error(10)
+            return None
+        return value
+
+    def _cmd_x(self, arguments: list[str]) -> None:
+        # Manual 4.3: 'X' reports the u,v step size; 'X,u,v' sets it.
+        if not arguments:
+            self.out.append(f"{self.stage_step_size[0]},{self.stage_step_size[1]}")
+            return
+        if len(arguments) < 2:
+            self._error(4)
+            return
+        try:
+            self.stage_step_size = (int(arguments[0]), int(arguments[1]))
+        except ValueError:
+            self._error(4)
+            return
+        self._ok()
+
+    def _cmd_c(self, arguments: list[str]) -> None:
+        # Manual 4.4: 'C' reports the focus step size w; 'C,w' sets it.
+        if not arguments:
+            self.out.append(str(self.focus_step_size))
+            return
+        try:
+            self.focus_step_size = int(arguments[0])
+        except ValueError:
+            self._error(4)
+            return
+        self._ok()
+
+    # --------------------------------------------------- joystick speed, skew
+
+    def _cmd_o(self, arguments: list[str]) -> None:
+        self._joystick_speed_command("O", arguments)
+
+    def _cmd_of(self, arguments: list[str]) -> None:
+        self._joystick_speed_command("OF", arguments)
+
+    def _joystick_speed_command(self, name: str, arguments: list[str]) -> None:
+        """Manual 4.3 O / 4.4 OF: the reported value is scaled by the hot-key state.
+
+        "Reports value of O allowing for joystick speed buttons effect (if the button
+        speed is 1/2 and O is set to 50 the returned value will be 25)". The stored
+        setting is unchanged, which is exactly why a captured value must not be replayed.
+        """
+        if not arguments:
+            self.out.append(str(int(self.joystick_speed[name] * self.hot_key_fraction)))
+            return
+        try:
+            value = int(arguments[0])
+        except ValueError:
+            self._error(4)
+            return
+        if not 1 <= value <= 100:
+            self._error(10)
+            return
+        self.joystick_speed[name] = value
+        self._ok()
+
+    def _cmd_skew(self, arguments: list[str]) -> None:
+        # Manual 4.3: the command table documents the query form only.
+        if arguments:
+            self._error(4)
+            return
+        self.out.append(self.skew_angle)
+
+    # ------------------------------------------- software limits, currents, zplane
+
+    def _cmd_untlimit(self, arguments: list[str]) -> None:
+        # Manual 4.3: 'UNTLIMIT,?' returns the unit type, 'UNTLIMIT,u' sets it.
+        if not arguments:
+            self._error(4)
+            return
+        if arguments[0] == "?":
+            self.out.append(str(self.limit_units))
+            return
+        try:
+            value = int(arguments[0])
+        except ValueError:
+            self._error(4)
+            return
+        if value not in (0, 1):
+            self._error(10)
+            return
+        self.limit_units = value
+        # Manual 4.3: "changing units will clear the software limits set."
+        self.software_limits = {"R": "N,N,N,N", "A": "N,N,N,N"}
+        self._ok()
+
+    def _cmd_chklimitr(self, arguments: list[str]) -> None:
+        self.out.append(self.software_limits["R"])
+
+    def _cmd_chklimita(self, arguments: list[str]) -> None:
+        self.out.append(self.software_limits["A"])
+
+    def _cmd_actlimitr(self, arguments: list[str]) -> None:
+        self._limits_active_command("R", arguments)
+
+    def _cmd_actlimita(self, arguments: list[str]) -> None:
+        self._limits_active_command("A", arguments)
+
+    def _limits_active_command(self, kind: str, arguments: list[str]) -> None:
+        if not arguments:
+            self._error(4)
+            return
+        if arguments[0] == "?":
+            self.out.append(str(self.limits_active[kind]))
+            return
+        try:
+            value = int(arguments[0])
+        except ValueError:
+            self._error(4)
+            return
+        if value not in (0, 1):
+            self._error(10)
+            return
+        self.limits_active[kind] = value
+        self._ok()
+
+    def _cmd_current(self, arguments: list[str]) -> None:
+        # Manual 4.3: 'CURRENT,a' returns 'r,s,t'; 'CURRENT,a,r,s,t' sets them.
+        if not arguments:
+            self._error(4)
+            return
+        axis = arguments[0]
+        if axis not in self.drive_current:
+            self._error(10)
+            return
+        if len(arguments) == 1:
+            self.out.append(self.drive_current[axis])
+            return
+        if len(arguments) < 4:
+            self._error(4)
+            return
+        self.drive_current[axis] = ",".join(arguments[1:4])
+        self._ok()
+
+    def _cmd_zplane(self, arguments: list[str]) -> None:
+        # Manual 4.4: 'ZPLANE' returns the enabled status; arguments define/enable a plane.
+        if not arguments:
+            self.out.append(str(self.zplane_enabled))
+            return
+        selector = arguments[0].upper()
+        if selector == "E":
+            self.zplane_enabled = 1
+        elif selector == "D":
+            self.zplane_enabled = 0
+        elif selector not in ("1", "2", "3"):
+            self._error(10)
+            return
         self._ok()
 
     def _cmd_sis(self, arguments: list[str]) -> None:

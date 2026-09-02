@@ -1,0 +1,19 @@
+# Tooling configuration only. The driver itself is not a package: SweepMe! loads
+# src/Switch-Prior_ProScanIII/main.py by path, so there is nothing to build or install.
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "RET", "ARG"]
+ignore = [
+    "E501",    # long lines are checked by line-length, and manual quotes run long
+    "ARG002",  # unused method arguments: pysweepme lifecycle signatures are fixed
+    "ARG005",  # unused lambda arguments: test stubs must match the real signatures
+    "SIM105",  # contextlib.suppress is less legible than try/except here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The bench deliberately reaches into the driver's internals to test them.
+"tests/*" = ["SLF001"]

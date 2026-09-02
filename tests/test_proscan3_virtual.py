@@ -10,8 +10,11 @@ Exits non-zero if any check fails, so it works as a pre-commit gate.
 
 from __future__ import annotations
 
+import configparser
 import importlib.util
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,8 +27,19 @@ from pysweepme.EmptyDeviceClass import EmptyDevice  # noqa: E402
 
 from proscan3_simulator import DeadPort, ProScanIIISimulator  # noqa: E402
 
-# FolderManager is Windows-specific; the driver only ever needs a scratch path.
-EmptyDevice.get_folder = lambda self, identifier: "/tmp"  # type: ignore[assignment]
+# FolderManager needs a real SweepMe! installation. The driver only ever asks it for a
+# folder to keep configuration files in, so point every identifier at a throwaway
+# directory: the bench must never write into the user's SweepMe! folders.
+BENCH_FOLDER = Path(tempfile.mkdtemp(prefix="proscan3_bench_"))
+EmptyDevice.get_folder = lambda self, identifier: str(BENCH_FOLDER)  # type: ignore[assignment]
+
+CONFIG_FOLDER = BENCH_FOLDER / "Switch-Prior_ProScanIII"
+
+
+def clear_configurations() -> None:
+    """Empty the configuration folder so each test starts from a known dropdown."""
+    if CONFIG_FOLDER.exists():
+        shutil.rmtree(CONFIG_FOLDER)
 
 DRIVER_PATH = Path(__file__).parent.parent / "src" / "Switch-Prior_ProScanIII" / "main.py"
 
@@ -630,6 +644,391 @@ def test_error_spelling_variants(driver) -> None:
     )
 
 
+def read_config_file(name: str) -> configparser.ConfigParser:
+    """Parse a saved configuration file straight off disk."""
+    parser = configparser.ConfigParser()
+    with open(CONFIG_FOLDER / f"{name}.ini", encoding="utf-8") as handle:
+        parser.read_file(handle)
+    return parser
+
+
+def write_config_file(name: str, sections: dict) -> None:
+    """Write a configuration file by hand, to test the hand-edited path."""
+    CONFIG_FOLDER.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for section, options in sections.items():
+        lines.append(f"[{section}]")
+        lines.extend(f"{key} = {value}" for key, value in options.items())
+        lines.append("")
+    (CONFIG_FOLDER / f"{name}.ini").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_configuration_capture(driver) -> None:
+    print("\n[21] capturing the controller configuration to a file")
+    clear_configurations()
+
+    port = ProScanIIISimulator()
+    port.max_speed = {"X": 250, "Y": 250, "Z": 40}
+    port.acceleration = {"X": 300, "Y": 300, "Z": 55}
+    port.s_curve = {"X": 700, "Y": 700, "Z": 25}
+    port.backlash["BLSH"] = (1, 640)
+    port.joystick_direction["JXD"] = -1
+    port.serial_z_direction = -1
+    device = bring_up(driver, port, **{"Save configuration as": "bench"})
+
+    device.save_configuration()
+    saved = CONFIG_FOLDER / "bench.ini"
+    check(saved.is_file(), "the action writes <name>.ini into the device data folder")
+    check(
+        any("bench.ini" in message for message in device.messages),
+        "the action reports the path it wrote to",
+    )
+
+    parsed = read_config_file("bench")
+    check(parsed.get("stage", "max_speed") == "250", "SMS is captured into [stage]")
+    check(parsed.get("stage", "acceleration") == "300", "SAS is captured into [stage]")
+    check(parsed.get("stage", "s_curve") == "700", "SCS is captured into [stage]")
+    check(parsed.get("stage", "backlash_serial") == "1,640", "BLSH is captured as 's,b'")
+    check(parsed.get("stage", "joystick_x_direction") == "-1", "JXD is captured")
+    check(parsed.get("focus", "max_speed") == "40", "SMZ is captured into [focus]")
+    check(parsed.get("focus", "acceleration") == "55", "SAZ is captured into [focus]")
+    check(parsed.get("focus", "s_curve") == "25", "SCZ is captured into [focus]")
+    check(parsed.get("focus", "serial_move_direction") == "-1", "ZD is captured")
+    check(
+        parsed.get("reference", "controller_serial") == "123456",
+        "the controller serial number is recorded for identification",
+    )
+    check(
+        parsed.get("metadata", "name") == "bench",
+        "the file records its own name in [metadata]",
+    )
+    check(
+        parsed.get("stage", "move_x_direction") == ""
+        and parsed.get("stage", "move_y_direction") == "",
+        "XD/YD are left empty, because the manual documents no way to read them",
+    )
+    check(
+        "NO WAY TO READ THIS BACK" in saved.read_text(encoding="utf-8").upper(),
+        "the file says XD/YD cannot be read back",
+    )
+
+    # Capture must be strictly read-only: every command it sends is a documented query.
+    expected_queries = {item.query for item in driver.CONFIG_ITEMS if item.query}
+    port.log.clear()
+    device.capture_configuration()
+    unexpected = [command for command in port.log if command not in expected_queries]
+    check(not unexpected, f"capture sends queries only (stray: {unexpected})")
+    check(
+        len(port.log) == len(expected_queries),
+        "capture reads every documented property exactly once",
+    )
+
+
+def test_configuration_apply(driver) -> None:
+    print("\n[22] applying a saved configuration")
+    clear_configurations()
+
+    port = ProScanIIISimulator()
+    port.max_speed = {"X": 220, "Y": 220, "Z": 44}
+    port.acceleration = {"X": 330, "Y": 330, "Z": 66}
+    port.backlash["BLZH"] = (1, 900)
+    port.joystick_direction["JYD"] = -1
+    device = bring_up(driver, port, **{"Save configuration as": "restore-me"})
+    device.save_configuration()
+
+    # Somebody moves every setting away from the captured state.
+    port.max_speed = {"X": 100, "Y": 100, "Z": 100}
+    port.acceleration = {"X": 100, "Y": 100, "Z": 100}
+    port.backlash["BLZH"] = (0, 1)
+    port.joystick_direction["JYD"] = 1
+
+    device = bring_up(driver, port, Configuration="restore-me")
+
+    check(port.max_speed["X"] == 220, "configure() restores the X/Y maximum speed")
+    check(port.max_speed["Z"] == 44, "configure() restores the focus maximum speed")
+    check(port.acceleration["X"] == 330, "configure() restores the X/Y acceleration")
+    check(port.acceleration["Z"] == 66, "configure() restores the focus acceleration")
+    check(port.backlash["BLZH"] == (1, 900), "configure() restores the focus backlash")
+    check(port.joystick_direction["JYD"] == -1, "configure() restores the joystick direction")
+
+    # An explicit GUI field must win over the stored value.
+    port.max_speed = {"X": 100, "Y": 100, "Z": 100}
+    bring_up(
+        driver, port, Configuration="restore-me",
+        **{"Speed (empty = unchanged)": "150"},
+    )
+    check(
+        port.max_speed["X"] == 150,
+        "an explicit Speed field overrides the configuration",
+    )
+
+
+def test_configuration_never_restores_reference(driver) -> None:
+    print("\n[23] settings that are captured but never sent back")
+    clear_configurations()
+
+    port = ProScanIIISimulator()
+    device = bring_up(driver, port, **{"Save configuration as": "reference"})
+    device.save_configuration()
+
+    parsed = read_config_file("reference")
+    for key in (
+        "position",
+        "stage_joystick_speed",
+        "focus_joystick_speed",
+        "drive_current_x",
+        "software_limit_units",
+        "software_limits_relative",
+        "software_limits_relative_active",
+        "skew_angle",
+        "focus_plane_tracking",
+    ):
+        check(parsed.has_option("reference", key), f"{key} is recorded in [reference]")
+
+    port.log.clear()
+    device.apply_configuration("reference")
+
+    forbidden_prefixes = ("O", "OF", "CURRENT", "UNTLIMIT", "ACTLIMITR", "ACTLIMITA",
+                          "XLIMITR", "YLIMITR", "XLIMITA", "YLIMITA",
+                          "PX", "PY", "PZ", "P", "Z", "SIS", "SIZ", "RIS", "GX", "GY", "GZ")
+    sent = [command.split(",")[0].upper() for command in port.log]
+    leaked = sorted({name for name in sent if name in forbidden_prefixes})
+    check(not leaked, f"applying sends nothing from [reference] (leaked: {leaked})")
+    check(
+        not any(command.upper().startswith("CURRENT,") and "," in command[8:]
+                for command in port.log),
+        "motor drive currents are never written back",
+    )
+
+    # The stage travel envelope must be left exactly as found.
+    check(
+        port.software_limits == {"R": "N,N,N,N", "A": "N,N,N,N"}
+        and port.limits_active == {"R": 0, "A": 0},
+        "the software limits are untouched by an apply",
+    )
+
+
+def test_configuration_hot_key_quirk(driver) -> None:
+    print("\n[24] the joystick hot-key scaling of O and OF")
+    clear_configurations()
+
+    # Manual 4.3 O: the reported value is scaled by the hot-key state, so a capture taken
+    # after one press of the speed button reads half the real setting.
+    port = ProScanIIISimulator(hot_key_fraction=0.5)
+    port.joystick_speed = {"O": 80, "OF": 60}
+    device = bring_up(driver, port, **{"Save configuration as": "hotkey"})
+    device.save_configuration()
+
+    parsed = read_config_file("hotkey")
+    check(
+        parsed.get("reference", "stage_joystick_speed") == "40",
+        "the capture records the hot-key-scaled value the controller reports (40, not 80)",
+    )
+    check(
+        parsed.get("reference", "focus_joystick_speed") == "30",
+        "the same scaling applies to OF",
+    )
+    check(
+        "hot-key" in (CONFIG_FOLDER / "hotkey.ini").read_text(encoding="utf-8"),
+        "the file explains why the value is not restored",
+    )
+
+    port.log.clear()
+    device.apply_configuration("hotkey")
+    check(
+        not [command for command in port.log if command.upper().startswith(("O,", "OF,"))],
+        "applying never writes O or OF, so a hot-key reduction cannot become permanent",
+    )
+    check(port.joystick_speed == {"O": 80, "OF": 60}, "the real joystick speeds are unchanged")
+
+
+def test_configuration_unsupported_commands(driver) -> None:
+    print("\n[25] a controller that does not implement every command")
+    clear_configurations()
+
+    missing = {"SKEW", "ZPLANE", "CURRENT", "CHKLIMITA", "SCZ"}
+    port = ProScanIIISimulator(unsupported_commands=missing)
+    device = bring_up(driver, port, **{"Save configuration as": "partial"})
+
+    device.save_configuration()
+    check(
+        (CONFIG_FOLDER / "partial.ini").is_file(),
+        "a rejected command does not abort the capture",
+    )
+
+    parsed = read_config_file("partial")
+    check(parsed.get("reference", "skew_angle") == "", "an unsupported property is left empty")
+    check(parsed.get("focus", "s_curve") == "", "an unsupported restorable property is empty too")
+    text = (CONFIG_FOLDER / "partial.ini").read_text(encoding="utf-8")
+    check("NOT AVAILABLE" in text, "the file records why the value is missing")
+    check(
+        "COMMAND_NOT_FOUND" in text,
+        "the controller's own reason is preserved in the file",
+    )
+    check(
+        any("did not answer" in message for message in device.messages),
+        "the user is told how many settings could not be read",
+    )
+
+    # Applying it must skip the empty values rather than sending 'SCZ,'.
+    port.log.clear()
+    device.apply_configuration("partial")
+    check(
+        not [command for command in port.log if command.upper().startswith("SCZ")],
+        "an empty value is not sent to the controller",
+    )
+    check(
+        any(command.upper().startswith("SCS,") for command in port.log),
+        "the properties that were captured are still restored",
+    )
+
+
+def test_configuration_validation(driver) -> None:
+    print("\n[26] a hand-edited configuration is range-checked before it is sent")
+    clear_configurations()
+
+    port = ProScanIIISimulator()
+    device = bring_up(driver, port)
+
+    write_config_file("bad-speed", {"focus": {"max_speed": "500"}})
+    expect_error(
+        lambda: device.apply_configuration("bad-speed"),
+        "a focus speed above the documented 1-100 is refused",
+        contains="outside the documented range",
+    )
+
+    write_config_file("bad-direction", {"stage": {"joystick_x_direction": "0"}})
+    expect_error(
+        lambda: device.apply_configuration("bad-direction"),
+        "a direction other than 1 or -1 is refused",
+        contains="documents only",
+    )
+
+    write_config_file("bad-number", {"stage": {"max_speed": "fast"}})
+    expect_error(
+        lambda: device.apply_configuration("bad-number"),
+        "a non-numeric value is refused with the key named",
+        contains="stage.max_speed",
+    )
+
+    # Manual 4.3: above 1000 on X/Y is allowed but not guaranteed, so it warns and proceeds.
+    write_config_file("high-speed", {"stage": {"max_speed": "1500"}})
+    device.messages.clear()
+    device.apply_configuration("high-speed")
+    check(port.max_speed["X"] == 1500, "an X/Y speed above 1000 is passed on")
+    check(
+        any("does not guarantee" in message for message in device.messages),
+        "and it is passed on with a warning",
+    )
+
+    write_config_file("nothing", {"stage": {"max_speed": ""}})
+    port.log.clear()
+    device.messages.clear()
+    device.apply_configuration("nothing")
+    check(not port.log, "a file with no values sends nothing")
+    check(
+        any("no restorable settings" in message for message in device.messages),
+        "and says so rather than silently doing nothing",
+    )
+
+
+def test_configuration_selection(driver) -> None:
+    print("\n[27] the configuration dropdown")
+    clear_configurations()
+
+    port = ProScanIIISimulator()
+    device = bring_up(driver, port, **{"Save configuration as": "zeta"})
+    device.save_configuration()
+    device.save_configuration_name = "alpha"
+    device.save_configuration()
+
+    names = device.list_configurations()
+    check(names == ["alpha", "zeta"], f"saved names are listed alphabetically, got {names}")
+
+    fresh = driver.Device()
+    parameters = fresh.set_GUIparameter()
+    check(
+        parameters["Configuration"] == ["None", "alpha", "zeta"],
+        "the dropdown offers None plus every saved file",
+    )
+    check("Save configuration as" in parameters, "there is a field for the name to save under")
+
+    # A name that no longer exists must stop the run, not run unconfigured.
+    expect_error(
+        lambda: bring_up(driver, ProScanIIISimulator(), Configuration="deleted"),
+        "a missing configuration file fails the run with a clear message",
+        contains="was not found",
+    )
+
+    for name in ("../escape", "sub/dir", "with:colon"):
+        expect_error(
+            lambda name=name: device.write_configuration(name),
+            f"the name {name!r} is rejected as a file name",
+            contains="not usable as a file name",
+        )
+
+    device.save_configuration_name = ""
+    device.save_configuration()
+    generated = [
+        entry for entry in device.list_configurations() if entry.startswith("proscan3_123456_")
+    ]
+    check(len(generated) == 1, "an empty name generates one from the serial number and time")
+
+
+def test_configuration_serial_mismatch(driver) -> None:
+    print("\n[28] a configuration captured from a different controller")
+    clear_configurations()
+
+    port = ProScanIIISimulator(serial_number="111111")
+    device = bring_up(driver, port, **{"Save configuration as": "other-box"})
+    device.save_configuration()
+
+    other = ProScanIIISimulator(serial_number="222222")
+    other.max_speed = {"X": 100, "Y": 100, "Z": 100}
+    device = bring_up(driver, other, Configuration="other-box")
+
+    check(
+        any("was captured from controller serial 111111" in message
+            for message in device.messages),
+        "the mismatch is reported",
+    )
+    check(other.max_speed["X"] == 100, "and the settings are still applied")
+
+
+def test_configuration_restore_order(driver) -> None:
+    print("\n[29] UPR is restored before the focus scaling that depends on it")
+    clear_configurations()
+
+    port = ProScanIIISimulator()
+    device = bring_up(driver, port, **{"Save configuration as": "order"})
+    device.save_configuration()
+
+    port.log.clear()
+    device.apply_configuration("order")
+    sent = [command.split(",")[0].upper() for command in port.log]
+    check("UPR" in sent and "SSZ" in sent, "both focus scaling commands are sent")
+    check(
+        sent.index("UPR") < sent.index("SSZ"),
+        "UPR,Z goes first, because the manual says it resets RES,Z to 0.1 microns",
+    )
+
+
+def test_configuration_action_never_raises(driver) -> None:
+    print("\n[30] the save action survives a dead controller")
+    clear_configurations()
+
+    device = make_device(driver, DeadPort(), **{"Save configuration as": "dead"})
+    device.save_configuration()
+    check(
+        any("could not save the configuration" in message for message in device.messages),
+        "a silent controller is reported through message_box, not raised",
+    )
+    check(
+        not (CONFIG_FOLDER / "dead.ini").exists(),
+        "and no half-written file is left behind",
+    )
+
+
 def main() -> int:
     driver = load_driver(DRIVER_PATH)
 
@@ -657,6 +1056,16 @@ def main() -> int:
         test_stop_with_extra_acknowledgement,
         test_upr_scale_source,
         test_error_spelling_variants,
+        test_configuration_capture,
+        test_configuration_apply,
+        test_configuration_never_restores_reference,
+        test_configuration_hot_key_quirk,
+        test_configuration_unsupported_commands,
+        test_configuration_validation,
+        test_configuration_selection,
+        test_configuration_serial_mismatch,
+        test_configuration_restore_order,
+        test_configuration_action_never_raises,
     ):
         test(driver)
 
@@ -664,6 +1073,8 @@ def main() -> int:
     print(f"{CHECKS - len(FAILURES)}/{CHECKS} checks passed")
     for failure in FAILURES:
         print(f"  FAILED: {failure}")
+
+    shutil.rmtree(BENCH_FOLDER, ignore_errors=True)
 
     return 1 if FAILURES else 0
 

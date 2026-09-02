@@ -1,0 +1,10 @@
+# Everything needed to run the test bench and the linter on a machine with no
+# SweepMe! installation. The bench stubs pythonnet, so this works on Windows,
+# macOS and Linux alike.
+#
+#   pip install -r requirements-dev.txt
+#   python tests/test_proscan3_virtual.py
+#   ruff check src tests
+
+pysweepme>=1.5.7
+ruff>=0.5

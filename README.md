@@ -8,12 +8,20 @@ Built for translation sequences: move to a coordinate, record, move to the next.
 values are positions in micrometres; the driver reads the controller's own user-unit
 scaling and converts, so a non-default `SS`/`RES` setting cannot silently rescale a scan.
 
+It can also capture the controller's current settings — speed, acceleration, S-curve,
+backlash, joystick directions, scaling — into a named file and reapply them on later runs,
+so a setup made by hand in the Prior GUI survives a power cycle.
+
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 112 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 183 checks
+CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
+docs/configuration-capture.md          what the configuration capture saves, and what it will not
 docs/hardware-test-procedure.md        bring-up procedure on real hardware
+docs/development-status.md             what is done, what is out of scope, what is next
+docs/manual-reference.md               which manual, where to get it, how to navigate it
 ```
 
 ## Install
@@ -32,6 +40,8 @@ point `pysweepme.get_driver` at) and add a **Switch** module to the sequencer.
 | **Move timeout in s** | How long to wait for the end-of-move `R` before stopping the axis and raising |
 | **Position tolerance in µm** | How far the readback may differ from the target before the point is treated as a failure |
 | **Disable joystick during run** | Sends `H,1` in `configure()` and `J` in `unconfigure()`, so a nudged joystick cannot corrupt a scan |
+| **Configuration** | A saved controller configuration to apply at the start of each run, or `None`. The list is the contents of the configuration folder, read when the driver loads. See [configuration capture](docs/configuration-capture.md) |
+| **Save configuration as** | The file name the **Save configuration** button writes to. Leave empty to have one generated from the controller serial number and the current time |
 
 Output variable: `Position` in µm — the *measured* position, not the requested one.
 
@@ -44,6 +54,36 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 | `restore_index_of_stage` | `RIS` — re-synchronise the whole X/Y stage with the controller after it was moved by hand while powered off. **Moves the stage.** Requires `SIS` to have been done once |
 | `zero_this_axis` | Sets this axis' position counter to zero without moving. Uses `PX`/`PY`/`PZ`, not the bare `Z` command, which would zero all three axes and clear the software limits |
 | `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT` |
+| `save_configuration` | Read-only. Captures the controller's current settings for both the stage and the focus axis into the file named in **Save configuration as**, and reports the path |
+
+## Saved configurations
+
+Set the controller up however you like, type a name into **Save configuration as**, and
+press **Save configuration**. Reload the driver, then pick that name in the
+**Configuration** dropdown to have the settings applied at the start of every run. Explicit
+**Speed** and **Acceleration** fields override the stored values.
+
+The file is a commented `.ini` in
+`C:\Users\Public\Documents\SweepMe!\DataDevices\Switch-Prior_ProScanIII\`, meant to be read
+and edited. Each entry carries its manual reference, and a hand-edited value is
+range-checked before it is sent.
+
+Restored: `SMS`, `SAS`, `SCS`, `SS`, `X`, `BLSH`, `BLSJ`, `JXD`, `JYD` for the stage, and
+`UPR,Z`, `SSZ`, `SMZ`, `SAZ`, `SCZ`, `C`, `BLZH`, `BLZJ`, `JZD`, `ZD` for the focus axis.
+
+Captured but deliberately never written back, each with the reason in the file: motor drive
+currents (`CURRENT` — the manual warns of overheating and failure), the software limits
+(`ACTLIMITR` recalculates them relative to the current position, and `UNTLIMIT` clears
+them), the joystick speeds (`O`/`OF` report a hot-key-scaled value, so replaying it makes a
+temporary reduction permanent), the position (`PX`/`PY`/`PZ` redefine zero rather than
+moving), `RES` (derived from `SS`), `SKEW` and `ZPLANE` (no usable set form), and `COMP`
+(forced to standard mode).
+
+**One genuine gap.** `XD` and `YD`, which set the mechanical direction of a commanded stage
+move, have no query form anywhere in the manual — only the joystick directions `JXD`/`JYD`
+and the focus axis' `ZD` can be read. The capture leaves those two keys empty for you to
+fill in by hand; the driver does not guess. Details in
+[docs/configuration-capture.md](docs/configuration-capture.md).
 
 ## Design notes
 
@@ -63,10 +103,39 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 * **No resets, no scale changes.** The driver reads `RES`/`SS` but never writes them, and
   never sends a reset — other modules may share the controller.
 
-`docs/command-map.md` lists all eighteen quirks the driver defends against, including the
+* **The configuration capture is read-only, and asymmetric on purpose.** It sends nothing
+  but documented queries. Roughly a third of what it captures is never written back,
+  because on this controller reading a property and writing it are not inverse operations —
+  see [docs/configuration-capture.md](docs/configuration-capture.md).
+
+`docs/command-map.md` lists all twenty-two quirks the driver defends against, including the
 one that will bite anyone writing a ProScan III driver from scratch: `=` reports the
 limit-switch latch in **decimal** while `LMT` reports it in **hexadecimal**, and the
 manual's examples agree for values below 10.
+
+## Continuing development on another machine
+
+Everything needed is in the repository, with one deliberate exception: the Prior manual,
+which is Prior Scientific's copyrighted document and is not redistributed here. See
+[docs/manual-reference.md](docs/manual-reference.md) for the exact edition, where to get
+it, and how to make it greppable.
+
+```bash
+git clone https://github.com/Dave-J-W/sweepme-prior-proscan3.git
+cd sweepme-prior-proscan3
+git config user.name  "Dave-J-W"
+git config user.email "248028152+Dave-J-W@users.noreply.github.com"
+pip install -r requirements-dev.txt
+python tests/test_proscan3_virtual.py     # expect 183/183
+ruff check src tests
+```
+
+No SweepMe! installation is needed to develop or test: the bench stubs pythonnet and
+overrides the folder manager, so it runs on Windows, macOS and Linux alike.
+
+Read [CLAUDE.md](CLAUDE.md) before changing the driver — it holds the conventions and the
+rules about what must never be sent to this controller. Saved configuration `.ini` files
+live in SweepMe!'s data folder, not here, so they do not travel with a clone.
 
 ## Tests
 
@@ -75,13 +144,20 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 112 checks covering the translation sequence, all three axes,
+No hardware needed. 183 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,
 the `RES`- and `UPR`-absent scale fallbacks, range rejection, both documented error
 spellings, the multi-line `DATE` response, a desynchronised link, and every action button
 against a dead port.
+
+The configuration capture adds checks that it sends queries and nothing else, that a
+controller rejecting some commands still yields a usable file, that the hot-key-scaled `O`
+and `OF` values are recorded but never replayed, that nothing from the reference section
+reaches the controller, that `UPR,Z` precedes `SSZ`, that hand-edited values are
+range-checked, that a name cannot escape the configuration folder, and that a selected file
+which has since been deleted fails the run instead of running unconfigured.
 
 ## Assumptions and manual ambiguities
 
@@ -116,13 +192,22 @@ Stated plainly, because none of these is settled by the manual:
    as intended whilst limits are active" but the driver does not query `ACTLIMITR`/
    `ACTLIMITA` before homing, since it never sets software limits itself. Clear them from
    Prior Terminal first if you use them.
-10. **Untested on hardware.** Every check so far is against the simulator. Work through
+10. **`CURRENT` query response format.** Manual 4.3 shows `0` in the response column for the
+   query form while the description says `CURRENT,1` returns `1000,500,500`. The driver
+   records whatever comes back verbatim as reference data and never writes it, so either
+   reading is harmless.
+11. **`XD`/`YD` are assumed unreadable, not merely undocumented.** No command in 4.2–4.4
+   reports them. If a future firmware adds a query form, the two empty keys in a saved
+   configuration are where it belongs.
+12. **Untested on hardware.** Every check so far is against the simulator. Work through
    `docs/hardware-test-procedure.md` before trusting a data set.
 
 Not implemented, because the brief was one-dimensional translation: multi-axis `G`,
-velocity moves (`VS`, `VZ`), software limits (`XLIMITA`/`SWLL`/…), stage mapping, patterns,
-TTL triggering, filter wheels, shutters, the fourth axis, and encoder commands. The command
-map notes where each lives in the manual.
+velocity moves (`VS`, `VZ`), *setting* software limits (`XLIMITA`/`SWLL`/…), stage mapping,
+patterns, TTL triggering, filter wheels, shutters, the fourth axis, and encoder commands.
+The configuration capture *reads* the software limits, the drive currents and the skew angle
+as reference data, but never writes them. The command map notes where each lives in the
+manual.
 
 ## Licence
 

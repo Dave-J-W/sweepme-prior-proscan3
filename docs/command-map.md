@@ -52,6 +52,55 @@ rather than raising.
 | `stop_motion`, timeout and stop paths | `I` | `R` | 4.2 |
 | `set_index` | `SIS` (X/Y) / `SIZ` (Z) | `R` | 4.3, 4.4 |
 | `restore_index_of_stage` | `RIS` | `R` | 4.3 |
+| `get_serial_number` | `SERIAL` | `n`, or `0` if never set | 4.2 |
+
+### Configuration capture
+
+Read by `capture_configuration` and, where a setter is listed, written by
+`apply_configuration`. The full table with the reason each non-restored property is left
+alone is in [configuration-capture.md](configuration-capture.md).
+
+| Property | Query | Response | Setter | Manual |
+|---|---|---|---|---|
+| X/Y max speed | `SMS` | `m` | `SMS,m` | 4.3 |
+| X/Y acceleration | `SAS` | `a` | `SAS,a` | 4.3 |
+| X/Y S-curve | `SCS` | `c` | `SCS,c` | 4.3 |
+| X/Y microsteps per user unit | `SS` | `s` | `SS,s` | 4.3 |
+| X/Y step size | `X` | `u,v` | `X,u,v` | 4.3 |
+| X/Y backlash, serial moves | `BLSH` | `s,b` | `BLSH,s,b` | 4.3 |
+| X/Y backlash, joystick moves | `BLSJ` | `s,b` | `BLSJ,s,b` | 4.3 |
+| Joystick X direction | `JXD` | `d` | `JXD,d` | 4.3 |
+| Joystick Y direction | `JYD` | `d` | `JYD,d` | 4.3 |
+| Commanded X move direction | **no query form** | — | `XD,d` | 4.3 |
+| Commanded Y move direction | **no query form** | — | `YD,d` | 4.3 |
+| Z microns per revolution | `UPR,Z` | `n` | `UPR,Z,n` | 4.4 |
+| Z microsteps per user unit | `SSZ` | `s` | `SSZ,s` | 4.4 |
+| Z max speed | `SMZ` | `m` | `SMZ,m` | 4.4 |
+| Z acceleration | `SAZ` | `a` | `SAZ,a` | 4.4 |
+| Z S-curve | `SCZ` | `c` | `SCZ,c` | 4.4 |
+| Z step size | `C` | `w` | `C,w` | 4.4 |
+| Z backlash, serial moves | `BLZH` | `s,b` | `BLZH,s,b` | 4.4 |
+| Z backlash, joystick moves | `BLZJ` | `s,b` | `BLZJ,s,b` | 4.4 |
+| Digipot Z direction | `JZD` | `d` | `JZD,d` | 4.4 |
+| Serial focus-move direction | `ZD` | `d` | `ZD,d` | 4.4 |
+| Position, all axes | `P` | `x,y,z` | never sent | 4.3 |
+| Joystick stage speed | `O` | `s`, hot-key scaled | never sent | 4.3 |
+| Joystick focus speed | `OF` | `s`, hot-key scaled | never sent | 4.4 |
+| Skew angle | `SKEW` | `a` | no documented set form | 4.3 |
+| Motor drive currents | `CURRENT,1/2/3` | `r,s,t` | never sent | 4.3 |
+| Software-limit unit type | `UNTLIMIT,?` | `u` | never sent | 4.3 |
+| Relative software limits | `CHKLIMITR` | `XL,XH,YL,YH` | never sent | 4.3 |
+| Absolute software limits | `CHKLIMITA` | `XL,XH,YL,YH` | never sent | 4.3 |
+| Relative limits active | `ACTLIMITR,?` | `a` | never sent | 4.3 |
+| Absolute limits active | `ACTLIMITA,?` | `a` | never sent | 4.3 |
+| Focus-plane tracking | `ZPLANE` | `a` | never sent | 4.4 |
+
+The `Command`, `Arguments` and `Response` columns of the manual's tables are offset from one
+another in the PDF's text layer, which makes a naive extraction attribute the wrong response
+to a command. Every row above was re-extracted in reading order and re-aligned against the
+argument list, which is how `ZD,d` was confirmed to answer `0` rather than the `R` a
+column-aligned reading suggests, and how the blank `RES` response cells were confirmed as
+genuinely blank.
 
 ## Limit-switch bit field (manual 4.2)
 
@@ -132,3 +181,22 @@ Each of these produces a plausible-looking wrong number rather than an error.
 18. **Loading a new stage's map blocks the controller.** After a `RESET`, a software update
     or a newly attached stage, the manual notes the controller is unresponsive for about
     20 seconds. Wait it out before connecting.
+19. **`O` and `OF` do not report what was set.** 4.3: the response allows "for joystick
+    speed buttons effect (if the button speed is ½ and O is set to 50 the returned value
+    will be 25)", and 4.14 says the hot key cycles 100 % → 50 % → 25 %. A configuration
+    capture therefore reads a *scaled* value, so the driver records it and never writes it
+    back; replaying it would make a temporary reduction permanent, and repeating the cycle
+    would halve it again.
+20. **`XD` and `YD` are write-only.** 4.3 lists them only with an argument. The `SS` entry
+    confirms they matter — "This value is linked with RES,S and XD/YD values" — but nothing
+    reports them, so a configuration capture cannot include the commanded-move direction of
+    the stage. The joystick equivalents `JXD`/`JYD` and the focus equivalent `ZD` all *do*
+    have query forms. The driver leaves the two unreadable keys empty for the user to fill
+    in rather than guessing.
+21. **Restoring software limits is not the inverse of reading them.** `ACTLIMITR`/`ACTLIMITA`
+    recalculate the limit positions relative to wherever the stage is when the command is
+    issued, and `UNTLIMIT` must precede any limit change while itself clearing every limit
+    that is set. So captured limits are reference data only.
+22. **`CURRENT` can destroy a motor.** 4.3: "Only use after receiving advice from Prior as
+    setting currents higher than that specified for the motor may cause overheating and
+    possibly failure." Captured, never written.

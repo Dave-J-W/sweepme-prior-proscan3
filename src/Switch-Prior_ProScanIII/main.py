@@ -33,16 +33,24 @@
 # (ProScan-III-Manual-v.1.16-0425-EN):
 #   4.1   ASCII commands, delimiters, <CR> termination, standard vs compatibility mode
 #   4.1.1 axis identification
-#   4.2   general commands ($, =, ?, COMP, DATE, ERROR, I, LMT, VERSION)
-#   4.3   stage commands (GX, GY, PX, PY, SS, RES, SIS, RIS, SAS, SMS, STAGE, H, J)
-#   4.4   Z-axis commands (GZ, PZ, SSZ, RES,Z, SIZ, SAZ, SMZ, FOCUS, UPR)
+#   4.2   general commands ($, =, ?, COMP, DATE, ERROR, I, LMT, SERIAL, VERSION)
+#   4.3   stage commands (GX, GY, PX, PY, SS, RES, SIS, RIS, SAS, SMS, SCS, STAGE, H, J,
+#         X, BLSH, BLSJ, JXD, JYD, XD, YD, O, SKEW, CURRENT, UNTLIMIT, CHKLIMITR,
+#         CHKLIMITA, ACTLIMITR, ACTLIMITA)
+#   4.4   Z-axis commands (GZ, PZ, SSZ, RES,Z, SIZ, SAZ, SMZ, SCZ, FOCUS, UPR, C, BLZH,
+#         BLZJ, JZD, ZD, OF, ZPLANE)
 #   4.13  error codes and ERRORSTAT
+#   4.14  joystick hot keys, which scale the value that O and OF report back
 # See docs/command-map.md in this repository for the full table.
 
 from __future__ import annotations
 
+import configparser
+import datetime
+import os
 import re
 import time
+from typing import NamedTuple
 
 from pysweepme.EmptyDeviceClass import EmptyDevice
 
@@ -162,6 +170,286 @@ AXIS_TABLE = {
     },
 }
 
+# Subfolder of the SweepMe! device-data folder that holds the saved configuration files.
+CONFIG_FOLDER_NAME = "Switch-Prior_ProScanIII"
+CONFIG_FILE_SUFFIX = ".ini"
+
+# Sections of a saved configuration file. Only RESTORED_SECTIONS are ever sent back to
+# the controller; REFERENCE_SECTION records what the controller was doing at capture time
+# but cannot, or must not, be written back. See docs/configuration-capture.md.
+RESTORED_SECTIONS = ("stage", "focus")
+REFERENCE_SECTION = "reference"
+METADATA_SECTION = "metadata"
+
+
+class ConfigItem(NamedTuple):
+    """One controller property that a configuration capture reads back.
+
+    query    the command that reads the value (manual 4.2-4.4), or None for a property
+             the manual gives no way to read, which is then written to the file as an
+             empty value for the user to fill in by hand.
+    setter   the command prefix used to write the value back. The controller's query and
+             set forms differ only by the appended value, so 'SMS' reads and 'SMS,100'
+             writes, and a captured response can be replayed verbatim. None means the
+             value is never sent, and the reason is in the note.
+    bounds   (low, high, strict) for a numeric value. strict=False means the manual
+             allows values above high without guaranteeing the result (manual 4.3).
+    choices  the complete set of values the manual documents, for properties whose
+             legal values are not a range.
+    """
+
+    key: str
+    section: str
+    query: str | None
+    setter: str | None
+    bounds: tuple[float, float | None, bool] | None
+    choices: tuple[int, ...] | None
+    note: str
+
+
+def _item(
+    key: str,
+    section: str,
+    query: str | None,
+    setter: str | None,
+    note: str,
+    *,
+    bounds: tuple[float, float | None, bool] | None = None,
+    choices: tuple[int, ...] | None = None,
+) -> ConfigItem:
+    return ConfigItem(key, section, query, setter, bounds, choices, note)
+
+
+# Every property the capture reads, in the order it is written to the file and, for the
+# restored sections, the order it is sent back to the controller. That order matters in
+# one place: manual 4.4 says "The UPR command always sets RES,Z back to 0.1 microns", so
+# microns_per_revolution has to be restored before the focus scaling that depends on it.
+CONFIG_ITEMS: tuple[ConfigItem, ...] = (
+    # ---------------------------------------------------------------- X/Y stage
+    _item(
+        "max_speed", "stage", "SMS", "SMS",
+        "X/Y maximum speed (manual 4.3, SMS). Documented range 1-1000, default 100. "
+        "Higher values are allowed but the manual does not guarantee the result.",
+        bounds=(1, 1000, False),
+    ),
+    _item(
+        "acceleration", "stage", "SAS", "SAS",
+        "X/Y acceleration (manual 4.3, SAS). Documented range 1-1000, default 100. "
+        "Higher values are allowed but the manual does not guarantee the result.",
+        bounds=(1, 1000, False),
+    ),
+    _item(
+        "s_curve", "stage", "SCS", "SCS",
+        "X/Y S-curve, the rate of change of acceleration (manual 4.3, SCS). Range 1-1000; "
+        "the default of 100 corresponds to a 13 ms curve time.",
+        bounds=(1, 1000, True),
+    ),
+    _item(
+        "microsteps_per_user_unit", "stage", "SS", "SS",
+        "Microsteps per user unit for the stage (manual 4.3, SS). This sets the size of "
+        "the unit every position and move command uses, and is linked with RES,S.",
+        bounds=(1, None, False),
+    ),
+    _item(
+        "step_size", "stage", "X", "X",
+        "Step size 'u,v' used by the B/L/R/F relative move commands (manual 4.3, X). "
+        "Default 1000,1000. This driver moves with GX/GY and does not use it.",
+    ),
+    _item(
+        "backlash_serial", "stage", "BLSH", "BLSH",
+        "Stage backlash 's,b' for moves sent over the serial port (manual 4.3, BLSH). "
+        "s=1 enables, s=0 disables; b is in microsteps.",
+    ),
+    _item(
+        "backlash_joystick", "stage", "BLSJ", "BLSJ",
+        "Stage backlash 's,b' for joystick moves (manual 4.3, BLSJ).",
+    ),
+    _item(
+        "joystick_x_direction", "stage", "JXD", "JXD",
+        "Direction of the X axis under joystick control (manual 4.3, JXD). "
+        "1 = joystick right moves the stage mechanically right, -1 = left.",
+        choices=(-1, 1),
+    ),
+    _item(
+        "joystick_y_direction", "stage", "JYD", "JYD",
+        "Direction of the Y axis under joystick control (manual 4.3, JYD). "
+        "1 = joystick forward moves the stage mechanically forward, -1 = back.",
+        choices=(-1, 1),
+    ),
+    _item(
+        "move_x_direction", "stage", None, "XD",
+        "Direction of a commanded X move relative to the software move (manual 4.3, XD). "
+        "THE MANUAL DOCUMENTS NO WAY TO READ THIS BACK, so the capture leaves it empty. "
+        "Fill in 1 or -1 by hand to have the driver restore it; leave it empty to have "
+        "the driver leave the controller's setting alone.",
+        choices=(-1, 1),
+    ),
+    _item(
+        "move_y_direction", "stage", None, "YD",
+        "Direction of a commanded Y move relative to the software move (manual 4.3, YD). "
+        "Not readable either; same rules as move_x_direction.",
+        choices=(-1, 1),
+    ),
+    # ------------------------------------------------------------- focus/Z axis
+    _item(
+        "microns_per_revolution", "focus", "UPR,Z", "UPR,Z",
+        "Microns of linear focus travel per motor revolution (manual 4.4, UPR). 100 for a "
+        "normal focus motor, 1000 for an FB20x focus block. Restored FIRST, because the "
+        "manual notes UPR always resets RES,Z to 0.1 microns.",
+        bounds=(1, None, False),
+    ),
+    _item(
+        "microsteps_per_user_unit", "focus", "SSZ", "SSZ",
+        "Microsteps per user unit for the focus axis (manual 4.4, SSZ). Defaults to the "
+        "number of microsteps per 0.1 micron, which is why one Z user unit is 0.1 micron "
+        "and not 1 micron. Linked with RES,Z and ZD.",
+        bounds=(1, None, False),
+    ),
+    _item(
+        "max_speed", "focus", "SMZ", "SMZ",
+        "Focus maximum speed (manual 4.4, SMZ). Range 1-100, enforced: unlike SMS, the "
+        "manual gives no allowance for higher values.",
+        bounds=(1, 100, True),
+    ),
+    _item(
+        "acceleration", "focus", "SAZ", "SAZ",
+        "Focus acceleration (manual 4.4, SAZ). Range 1-100, enforced.",
+        bounds=(1, 100, True),
+    ),
+    _item(
+        "s_curve", "focus", "SCZ", "SCZ",
+        "Focus S-curve as a percentage (manual 4.4, SCZ). Range 1-100.",
+        bounds=(1, 100, True),
+    ),
+    _item(
+        "step_size", "focus", "C", "C",
+        "Step size for the focus motor used by the D/U relative move commands "
+        "(manual 4.4, C). This driver moves with GZ and does not use it.",
+    ),
+    _item(
+        "backlash_serial", "focus", "BLZH", "BLZH",
+        "Focus backlash 's,b' for moves sent over the serial port (manual 4.4, BLZH).",
+    ),
+    _item(
+        "backlash_joystick", "focus", "BLZJ", "BLZJ",
+        "Focus backlash 's,b' for joystick and digipot moves (manual 4.4, BLZJ).",
+    ),
+    _item(
+        "joystick_z_direction", "focus", "JZD", "JZD",
+        "Direction of the Z axis under digipot control (manual 4.4, JZD). 1 or -1.",
+        choices=(-1, 1),
+    ),
+    _item(
+        "serial_move_direction", "focus", "ZD", "ZD",
+        "Direction of rotation of the focus motor for moves sent over the serial port "
+        "(manual 4.4, ZD). 1 suits a motor on the right-hand side of the microscope. "
+        "Unlike XD/YD this one IS readable.",
+        choices=(-1, 1),
+    ),
+    # --------------------------------------------------- captured but never sent
+    _item(
+        "controller_version", REFERENCE_SECTION, "VERSION", None,
+        "Controller software version as a three-figure number (manual 4.2). Identifies "
+        "the firmware this capture came from.",
+    ),
+    _item(
+        "controller_serial", REFERENCE_SECTION, "SERIAL", None,
+        "Controller serial number, or 0 if it was never set (manual 4.2). The driver "
+        "warns if it does not match the controller a configuration is applied to.",
+    ),
+    _item(
+        "compatibility_mode", REFERENCE_SECTION, "COMP", None,
+        "0 = standard, 1 = compatibility (manual 4.2). Never restored: the driver forces "
+        "standard mode in connect() because compatibility mode changes response formats.",
+    ),
+    _item(
+        "position", REFERENCE_SECTION, "P", None,
+        "Absolute position 'x,y,z' in user units at capture time (manual 4.3, P). Never "
+        "restored: PX/PY/PZ redefine where zero is rather than moving the stage, so "
+        "replaying a saved position would silently shift the coordinate system.",
+    ),
+    _item(
+        "stage_joystick_speed", REFERENCE_SECTION, "O", None,
+        "Stage speed under joystick control as a percentage (manual 4.3, O). Never "
+        "restored: the manual states the value reported back is scaled by the joystick "
+        "hot-key state, so a capture taken after a hot-key press reads 50 or 25 percent "
+        "of the real setting (manual 4.3 O, 4.14). Writing it back would make a "
+        "temporary speed reduction permanent.",
+    ),
+    _item(
+        "focus_joystick_speed", REFERENCE_SECTION, "OF", None,
+        "Focus speed under joystick/digipot control (manual 4.4, OF). Never restored, "
+        "for the same hot-key scaling reason as stage_joystick_speed.",
+    ),
+    _item(
+        "stage_resolution_microns", REFERENCE_SECTION, "RES,S", None,
+        "Stage resolution in microns per user unit (manual 4.3, RES). Never restored: it "
+        "is fully determined by microsteps_per_user_unit, and RES is the one command "
+        "whose response format the manual does not document.",
+    ),
+    _item(
+        "focus_resolution_microns", REFERENCE_SECTION, "RES,Z", None,
+        "Focus resolution in microns per user unit (manual 4.4, RES,Z). Never restored, "
+        "for the same reason as stage_resolution_microns.",
+    ),
+    _item(
+        "skew_angle", REFERENCE_SECTION, "SKEW", None,
+        "Stage skew angle in degrees (manual 4.3, SKEW). Never restored: the command "
+        "table documents only the query form.",
+    ),
+    _item(
+        "drive_current_x", REFERENCE_SECTION, "CURRENT,1", None,
+        "X motor 'running,standby,timeout' drive currents in mA and ms (manual 4.3, "
+        "CURRENT). NEVER restored: the manual says to use the set form only after "
+        "receiving advice from Prior, because currents above the motor rating can cause "
+        "overheating and failure.",
+    ),
+    _item(
+        "drive_current_y", REFERENCE_SECTION, "CURRENT,2", None,
+        "Y motor drive currents (manual 4.3, CURRENT). Never restored; see "
+        "drive_current_x.",
+    ),
+    _item(
+        "drive_current_z", REFERENCE_SECTION, "CURRENT,3", None,
+        "Z motor drive currents (manual 4.3, CURRENT). Never restored; see "
+        "drive_current_x.",
+    ),
+    _item(
+        "software_limit_units", REFERENCE_SECTION, "UNTLIMIT,?", None,
+        "Units the software limits are expressed in: 0 = microns, 1 = user units "
+        "(manual 4.3, UNTLIMIT). Never restored: the manual warns that changing the "
+        "units clears every software limit that is set.",
+    ),
+    _item(
+        "software_limits_relative", REFERENCE_SECTION, "CHKLIMITR", None,
+        "Relative software limits 'XL,XH,YL,YH', where N means no limit is set "
+        "(manual 4.3, CHKLIMITR). Never restored: ACTLIMITR recalculates the limits "
+        "relative to the position the stage is at when it is issued, so replaying them "
+        "from a different position would move the travel envelope.",
+    ),
+    _item(
+        "software_limits_absolute", REFERENCE_SECTION, "CHKLIMITA", None,
+        "Absolute software limits 'XL,XH,YL,YH' (manual 4.3, CHKLIMITA). Never restored; "
+        "see software_limits_relative.",
+    ),
+    _item(
+        "software_limits_relative_active", REFERENCE_SECTION, "ACTLIMITR,?", None,
+        "Whether the relative software limits are active (manual 4.3, ACTLIMITR). Never "
+        "restored; see software_limits_relative.",
+    ),
+    _item(
+        "software_limits_absolute_active", REFERENCE_SECTION, "ACTLIMITA,?", None,
+        "Whether the absolute software limits are active (manual 4.3, ACTLIMITA). Never "
+        "restored; see software_limits_relative.",
+    ),
+    _item(
+        "focus_plane_tracking", REFERENCE_SECTION, "ZPLANE", None,
+        "Whether focus tracking across a defined plane is enabled (manual 4.4, ZPLANE). "
+        "Never restored: enabling it requires the three XY/focus points that define the "
+        "plane, and the manual gives no way to read those back.",
+    ),
+)
+
 
 class Device(EmptyDevice):
     """SweepMe! Switch driver for one axis of a Prior Scientific ProScan III controller."""
@@ -189,6 +477,22 @@ class Device(EmptyDevice):
     &quot;Set index&quot; action button deliberately, once, after installation. Note that
     SIS indexes and zeroes the <b>whole X/Y stage</b>, not just the selected axis, and that
     the manual warns SIS and RIS do not work as intended while software limits are active.</p>
+    <h4>Saved configurations</h4>
+    <p>Set the controller up however you like &mdash; with the Prior GUI, the joystick, or
+    anything else &mdash; then type a name into &quot;Save configuration as&quot; and press
+    the <b>Save configuration</b> button. The driver reads the controller's speed,
+    acceleration, S-curve, backlash, joystick directions and scaling for both the stage and
+    the focus axis, and writes them to a named file. Selecting that name in the
+    <b>Configuration</b> dropdown makes the driver apply those settings at the start of
+    every run.</p>
+    <p>A new file only appears in the dropdown after the driver is reloaded, because
+    SweepMe! builds the list once. Explicit Speed and Acceleration fields are applied
+    <i>after</i> the configuration, so they override it.</p>
+    <p>The file also records settings that are captured for reference but deliberately
+    never sent back &mdash; motor drive currents, software limits, joystick speed, position
+    &mdash; each with the reason written next to it. Two settings, the XD and YD stage move
+    directions, cannot be read back at all; the file leaves them empty for you to fill in
+    by hand.</p>
     """
 
     actions = [
@@ -197,6 +501,7 @@ class Device(EmptyDevice):
         "restore_index_of_stage",
         "zero_this_axis",
         "report_status",
+        "save_configuration",
     ]
 
     def __init__(self) -> None:
@@ -238,6 +543,8 @@ class Device(EmptyDevice):
         self.move_timeout: float = 60.0
         self.position_tolerance: float = 2.0
         self.disable_joystick: bool = True
+        self.configuration_name: str = "None"
+        self.save_configuration_name: str = ""
 
         # Derived state
         self.axis_commands: dict = AXIS_TABLE["X"]
@@ -263,6 +570,11 @@ class Device(EmptyDevice):
             "Move timeout in s": "60",
             "Position tolerance in µm": "2.0",
             "Disable joystick during run": True,
+            "   ": None,
+            # Built by scanning the configuration folder, so SweepMe! only lists names
+            # that exist. A file saved during this session appears after a driver reload.
+            "Configuration": ["None", *self.list_configurations()],
+            "Save configuration as": "",
         }
 
     def get_GUIparameter(self, parameter: dict) -> None:
@@ -287,6 +599,11 @@ class Device(EmptyDevice):
             raise ValueError(msg)
 
         self.disable_joystick = bool(parameter["Disable joystick during run"])
+
+        # Both configuration fields are optional, so a setting file written by an older
+        # version of this driver still loads.
+        self.configuration_name = str(parameter.get("Configuration", "None")).strip()
+        self.save_configuration_name = str(parameter.get("Save configuration as", "")).strip()
 
         # port_properties is only consumed by pysweepme's get_port(), which runs after
         # get_GUIparameter(), so the baud rate can still be adjusted here.
@@ -333,7 +650,15 @@ class Device(EmptyDevice):
                 raise RuntimeError(msg)
 
     def configure(self) -> None:
-        """One-time setup: scale, speed, joystick, limit latch."""
+        """One-time setup: saved configuration, scale, speed, joystick, limit latch.
+
+        The saved configuration goes first, because it can change the user-unit scaling
+        (SS/SSZ/UPR), which everything after it depends on. The explicit Speed and
+        Acceleration fields go last, so an entry typed into the GUI beats the stored one.
+        """
+        if self.configuration_name and self.configuration_name != "None":
+            self.apply_configuration(self.configuration_name)
+
         self.user_unit_in_microns = self.determine_user_unit_in_microns()
 
         if self.speed_setting:
@@ -536,6 +861,361 @@ class Device(EmptyDevice):
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: could not read the status: {exc}")
 
+    def save_configuration(self) -> None:
+        """Capture the controller's current settings into a named file.
+
+        Sends only query commands, so it is safe to press at any time, including during a
+        run. The name comes from the "Save configuration as" GUI field; if that is empty a
+        name is generated from the controller serial number and the current time.
+        """
+        try:
+            name = self.save_configuration_name or self._generated_configuration_name()
+            path = self.write_configuration(name)
+            unread = [
+                item.key
+                for item in CONFIG_ITEMS
+                if item.section in RESTORED_SECTIONS and item.query is None
+            ]
+            self.message_box(
+                f"ProScan III: configuration saved to\n{path}\n\n"
+                f"Select '{name}' in the Configuration dropdown to apply it. The dropdown "
+                "is built when the driver loads, so reload the driver to see the new "
+                "entry.\n\n"
+                f"Not readable from the controller and left empty for you to fill in: "
+                f"{', '.join(unread)}.",
+            )
+        except Exception as exc:  # noqa: BLE001 - an action must not raise
+            self.message_box(f"ProScan III: could not save the configuration: {exc}")
+
+    # ----------------------------------------------- configuration capture
+
+    def get_configuration_folder(self) -> str:
+        """Return the folder holding the saved configuration files, creating it if needed.
+
+        DATADEVICES is the SweepMe! folder for device-specific data. Older and newer
+        pysweepme releases do not all define the same identifiers and get_folder() returns
+        False for one it does not know, so the candidates are tried in turn.
+        """
+        for identifier in ("DATADEVICES", "CUSTOMFILES", "TEMP"):
+            try:
+                base = self.get_folder(identifier)
+            except Exception:  # noqa: BLE001 - try the next identifier
+                continue
+            if not base or not isinstance(base, str):
+                continue
+            folder = os.path.join(base, CONFIG_FOLDER_NAME)
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError:
+                continue
+            return folder
+
+        msg = (
+            "Could not find a writable folder for the ProScan III configuration files. "
+            "None of the SweepMe! folders DATADEVICES, CUSTOMFILES or TEMP could be used."
+        )
+        raise RuntimeError(msg)
+
+    def list_configurations(self) -> list[str]:
+        """Return the names of the saved configurations, for the GUI dropdown.
+
+        Called while the GUI is being built, before any port exists, so it must never
+        raise: an unreachable folder simply means an empty list.
+        """
+        try:
+            folder = self.get_configuration_folder()
+            names = [
+                entry[: -len(CONFIG_FILE_SUFFIX)]
+                for entry in os.listdir(folder)
+                if entry.lower().endswith(CONFIG_FILE_SUFFIX)
+            ]
+        except Exception:  # noqa: BLE001 - the dropdown degrades to "None" only
+            return []
+        return sorted(names, key=str.lower)
+
+    def capture_configuration(self) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+        """Read every property in CONFIG_ITEMS, returning the values and any read failures.
+
+        A controller without a focus axis, or on older firmware, rejects some of these
+        with COMMAND_NOT_FOUND or NO_FOCUS. That is expected rather than fatal: the
+        property is recorded as unavailable, with the controller's reason, and the rest of
+        the capture continues.
+        """
+        sections = (*RESTORED_SECTIONS, REFERENCE_SECTION)
+        values: dict[str, dict[str, str]] = {section: {} for section in sections}
+        problems: dict[str, str] = {}
+
+        for item in CONFIG_ITEMS:
+            if item.query is None:
+                # Not readable from the controller; written out empty to be filled in.
+                values[item.section][item.key] = ""
+                continue
+            try:
+                values[item.section][item.key] = self._query(item.query)
+            except (RuntimeError, ValueError) as exc:
+                values[item.section][item.key] = ""
+                problems[f"{item.section}.{item.key}"] = str(exc)
+
+        return values, problems
+
+    def write_configuration(self, name: str) -> str:
+        """Capture the controller state and write it to <name>.ini. Returns the path."""
+        safe_name = self._validated_configuration_name(name)
+        folder = self.get_configuration_folder()
+        path = os.path.join(folder, safe_name + CONFIG_FILE_SUFFIX)
+
+        values, problems = self.capture_configuration()
+
+        # A capture where nothing at all could be read means the link is down, not that
+        # the controller has no settings. Writing that out would produce a file full of
+        # empty values that looks like a valid configuration and restores nothing.
+        readable = [item for item in CONFIG_ITEMS if item.query is not None]
+        if len(problems) == len(readable):
+            msg = (
+                "The ProScan III answered none of the "
+                f"{len(readable)} configuration queries, so nothing was saved. Check the "
+                "cable, the COM port and that the baud rate matches the controller."
+            )
+            raise RuntimeError(msg)
+
+        text = self._render_configuration(safe_name, values, problems)
+
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+        if problems:
+            self.message_info(
+                "ProScan III: the controller did not answer "
+                f"{len(problems)} of the {len(CONFIG_ITEMS)} settings; they are recorded "
+                "as unavailable in the file and will not be restored. "
+                f"({', '.join(sorted(problems))})",
+            )
+
+        return path
+
+    def read_configuration(self, name: str) -> configparser.ConfigParser:
+        """Load a saved configuration file, raising if it is missing or unreadable."""
+        path = os.path.join(
+            self.get_configuration_folder(),
+            self._validated_configuration_name(name) + CONFIG_FILE_SUFFIX,
+        )
+        if not os.path.isfile(path):
+            msg = (
+                f"The ProScan III configuration {name!r} was not found at {path}. It may "
+                "have been renamed or deleted since the driver was loaded."
+            )
+            raise RuntimeError(msg)
+
+        parser = configparser.ConfigParser()
+        try:
+            with open(path, encoding="utf-8") as handle:
+                parser.read_file(handle)
+        except (OSError, configparser.Error) as exc:
+            msg = f"Could not read the ProScan III configuration at {path}: {exc}"
+            raise RuntimeError(msg) from exc
+        return parser
+
+    def apply_configuration(self, name: str) -> None:
+        """Send the restorable settings of a saved configuration to the controller.
+
+        Only the [stage] and [focus] sections are sent, in CONFIG_ITEMS order. Everything
+        in [reference] is skipped by construction, because those items carry no setter.
+        An empty value means "leave the controller alone", which is how a property the
+        controller could not report, or one the manual gives no way to read, behaves.
+        """
+        parser = self.read_configuration(name)
+        self._warn_on_serial_mismatch(parser, name)
+
+        applied: list[str] = []
+        for item in CONFIG_ITEMS:
+            if item.setter is None or item.section not in RESTORED_SECTIONS:
+                continue
+            if not parser.has_option(item.section, item.key):
+                continue
+            value = parser.get(item.section, item.key).strip()
+            if not value:
+                continue
+            self._validate_configuration_value(item, value)
+            self._command(f"{item.setter},{value}")
+            applied.append(f"{item.section}.{item.key}={value}")
+
+        if not applied:
+            self.message_info(
+                f"ProScan III: the configuration {name!r} contained no restorable "
+                "settings, so nothing was sent to the controller.",
+            )
+
+    def _warn_on_serial_mismatch(self, parser: configparser.ConfigParser, name: str) -> None:
+        """Warn, without refusing, if the file came from a different controller."""
+        saved = parser.get(REFERENCE_SECTION, "controller_serial", fallback="").strip()
+        if not saved:
+            return
+        try:
+            current = self.get_serial_number()
+        except (RuntimeError, ValueError):
+            return
+        if current != saved:
+            self.message_info(
+                f"ProScan III: the configuration {name!r} was captured from controller "
+                f"serial {saved}, but this controller reports {current}. Applying it "
+                "anyway; check that the settings suit this hardware.",
+            )
+
+    def _validate_configuration_value(self, item: ConfigItem, value: str) -> None:
+        """Range-check a hand-editable value before it reaches the controller.
+
+        A captured value is valid by construction, but these files are meant to be edited
+        by hand, so a typo has to be caught here rather than becoming an E,n from the
+        controller or, worse, a silently clamped setting.
+        """
+        first = value.split(",")[0].strip()
+
+        if item.choices is not None:
+            try:
+                number = int(first)
+            except ValueError:
+                number = None
+            if number not in item.choices:
+                allowed = " or ".join(str(choice) for choice in item.choices)
+                msg = (
+                    f"The configuration value {item.section}.{item.key} = {value!r} is not "
+                    f"valid: the manual documents only {allowed} for {item.setter}."
+                )
+                raise ValueError(msg)
+            return
+
+        if item.bounds is None:
+            return
+
+        low, high, strict = item.bounds
+        try:
+            number = float(first)
+        except ValueError as exc:
+            msg = (
+                f"The configuration value {item.section}.{item.key} = {value!r} is not a "
+                f"number, so it cannot be sent as {item.setter}."
+            )
+            raise ValueError(msg) from exc
+
+        if number < low or (high is not None and number > high and strict):
+            limit = "no upper limit" if high is None else high
+            msg = (
+                f"The configuration value {item.section}.{item.key} = {value!r} is outside "
+                f"the documented range {low} to {limit} for {item.setter}."
+            )
+            raise ValueError(msg)
+
+        if high is not None and number > high:
+            self.message_info(
+                f"ProScan III: the configuration value {item.section}.{item.key} = {value} "
+                f"is above the documented range of {low}-{high}; the manual allows it but "
+                "does not guarantee the result.",
+            )
+
+    @staticmethod
+    def _validated_configuration_name(name: str) -> str:
+        """Reject a name that would escape the configuration folder or break the file."""
+        cleaned = name.strip()
+        if not cleaned:
+            msg = "A configuration name must not be empty."
+            raise ValueError(msg)
+        if cleaned != os.path.basename(cleaned) or any(
+            character in cleaned for character in '\\/:*?"<>|'
+        ):
+            msg = (
+                f"The configuration name {name!r} is not usable as a file name. Use "
+                "letters, digits, spaces, hyphens and underscores."
+            )
+            raise ValueError(msg)
+        return cleaned
+
+    def _generated_configuration_name(self) -> str:
+        """Build a default name from the controller serial number and the current time."""
+        try:
+            serial = self.get_serial_number()
+        except (RuntimeError, ValueError):
+            serial = "unknown"
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        return f"proscan3_{serial}_{stamp}"
+
+    def _render_configuration(
+        self,
+        name: str,
+        values: dict[str, dict[str, str]],
+        problems: dict[str, str],
+    ) -> str:
+        """Format a capture as a commented .ini file.
+
+        Written by hand rather than with ConfigParser.write() so every setting carries the
+        manual reference and, where it is not restored, the reason why.
+        """
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        version = values[REFERENCE_SECTION].get("controller_version", "") or "unknown"
+        serial = values[REFERENCE_SECTION].get("controller_serial", "") or "unknown"
+
+        lines = [
+            "# Prior Scientific ProScan III configuration",
+            "#",
+            f"# Captured {stamp} by the SweepMe! Switch-Prior_ProScanIII driver from",
+            f"# controller serial {serial}, software version {version}.",
+            "#",
+            "# The [stage] and [focus] sections are sent back to the controller when this",
+            "# file is chosen in the driver's Configuration dropdown, in the order they",
+            "# appear here. An empty value is left alone, so deleting a value is how you",
+            "# stop the driver restoring it.",
+            "#",
+            "# The [reference] section is NEVER sent. Each entry says why.",
+            "#",
+            "# Every value is the controller's own response, so it can be replayed",
+            "# verbatim. Editing one by hand is supported; the driver range-checks it",
+            "# against the manual before sending it.",
+            "",
+            f"[{METADATA_SECTION}]",
+            f"name = {name}",
+            f"captured = {stamp}",
+            f"driver_axis = {self.axis}",
+            "",
+        ]
+
+        for section in (*RESTORED_SECTIONS, REFERENCE_SECTION):
+            heading = {
+                "stage": "X/Y stage settings, restored (manual 4.3)",
+                "focus": "Focus/Z axis settings, restored (manual 4.4)",
+                REFERENCE_SECTION: "Captured for reference, never sent back",
+            }[section]
+            lines.extend([f"# --- {heading}", f"[{section}]", ""])
+
+            for item in CONFIG_ITEMS:
+                if item.section != section:
+                    continue
+                for wrapped in self._wrap_comment(item.note):
+                    lines.append(f"# {wrapped}")
+                failure = problems.get(f"{item.section}.{item.key}")
+                if failure:
+                    for wrapped in self._wrap_comment(f"NOT AVAILABLE: {failure}"):
+                        lines.append(f"# {wrapped}")
+                value = values[section].get(item.key, "")
+                lines.extend([f"{item.key} = {value}".rstrip(), ""])
+
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _wrap_comment(text: str, width: int = 76) -> list[str]:
+        """Wrap a note to comment width without pulling in textwrap for one call."""
+        words = text.split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > width and current:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines or [""]
+
     # ----------------------------------------------------- wrapped commands
 
     def get_version(self) -> int:
@@ -546,6 +1226,14 @@ class Device(EmptyDevice):
         except ValueError as exc:
             msg = f"Invalid VERSION response from the ProScan III: {response!r}"
             raise ValueError(msg) from exc
+
+    def get_serial_number(self) -> str:
+        """Return the controller serial number, or '0' if it was never set (manual 4.2).
+
+        Kept as text: the manual documents only that 'n is returned', and the value is
+        used for identification rather than arithmetic.
+        """
+        return self._query("SERIAL")
 
     def get_date_string(self) -> str:
         """Return the instrument name, version and compile time (manual 4.2, DATE).
