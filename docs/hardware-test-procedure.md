@@ -7,6 +7,11 @@ move nothing. Stop at the first step that misbehaves.
 firmware 1.03 — see `docs/development-status.md`, "What the bench controller settled",
 for the results and `docs/command-map.md` for the response formats it confirmed.
 
+**Shortcut for steps 1 and 2:** `stage.run_self_test()` does them in one action and prints
+a pass/fail line for each. It is read-only, needs nothing fitted, and scored 9/9 on the
+bare bench controller for both the X and the Z axis. Work through the steps by hand the
+first time you meet an unfamiliar controller; use the action afterwards.
+
 **On a controller with nothing plugged into it**, `?` reports `STAGE = NONE` and
 `FOCUS = NONE`, and then:
 
@@ -99,6 +104,13 @@ scaling is wrong — go back to step 2.
 ## 5. First motion — small, deliberate, watched
 
 Have a hand on the controller's power switch. Start well away from both limits.
+
+`stage.run_self_test_motion()` does this leg automatically: it refuses unless the axis is
+fitted, the scale is known, the axis is idle, the controller is in standard mode and no
+limit switch is already active, then moves +500 µm, checks arrival against the tolerance,
+and returns the axis to where it started. **Its refusals are verified on hardware; the
+move itself is not** — no stage has been attached to a controller yet. So do the 10 µm
+move below by hand first, watching the axis, and only then use the action.
 
 ```python
 start = stage.get_position_in_microns()

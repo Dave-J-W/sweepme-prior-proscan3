@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 188 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 216 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -53,7 +53,9 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 | `set_index` | `SIS` (X/Y) or `SIZ` (Z). **Moves into the hard limits** and sets zero there. `SIS` indexes and zeroes the **whole X/Y stage** to 0,0, not just the selected axis. Never automatic; press it deliberately, normally once after installation |
 | `restore_index_of_stage` | `RIS` — re-synchronise the whole X/Y stage with the controller after it was moved by hand while powered off. **Moves the stage.** Requires `SIS` to have been done once |
 | `zero_this_axis` | Sets this axis' position counter to zero without moving. Uses `PX`/`PY`/`PZ`, not the bare `Z` command, which would zero all three axes and clear the software limits |
-| `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT` |
+| `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT`. Each line is read independently, so one unreadable value does not take the whole report down |
+| `run_self_test` | **Tier 1, read-only.** Moves nothing and needs nothing fitted. Checks firmware, that the two-line `DATE` was drained, standard command mode, the serial number, what is fitted, both limit-switch number bases, the scaling, and that a rejection still decodes to a documented name. Anything unfitted or unreadable is reported as a note, not a failure |
+| `run_self_test_motion` | **Tier 2, moves the selected axis 500 µm and back.** Needs 0.5 mm of clear travel in the positive direction. Refuses before sending any movement command if the axis is not fitted, the scale is unknown, the axis is already moving, the controller is in compatibility mode, or a limit switch is already active. If it hits a limit mid-test it stops there and does not move again |
 | `save_configuration` | Read-only. Captures the controller's current settings for both the stage and the focus axis into the file named in **Save configuration as**, and reports the path |
 
 ## Saved configurations
@@ -79,10 +81,12 @@ temporary reduction permanent), the position (`PX`/`PY`/`PZ` redefine zero rathe
 moving), `RES` (derived from `SS`), `SKEW` and `ZPLANE` (no usable set form), and `COMP`
 (forced to standard mode).
 
-**One genuine gap.** `XD` and `YD`, which set the mechanical direction of a commanded stage
-move, have no query form anywhere in the manual — only the joystick directions `JXD`/`JYD`
-and the focus axis' `ZD` can be read. The capture leaves those two keys empty for you to
-fill in by hand; the driver does not guess. Details in
+**One gap.** `XD` and `YD`, which set the mechanical direction of a commanded stage move,
+have no query form anywhere in the manual — only the joystick directions `JXD`/`JYD` and
+the focus axis' `ZD` are documented as readable. Firmware 1.03 does in fact answer bare
+`XD` and `YD` with `-1`, so this is a decision about trusting undocumented behaviour
+rather than a hard limit; for now the capture still leaves those two keys empty for you to
+fill in by hand, and the driver does not guess. Details in
 [docs/configuration-capture.md](docs/configuration-capture.md).
 
 ## Design notes
@@ -126,7 +130,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 188/188
+python tests/test_proscan3_virtual.py     # expect 216/216
 ruff check src tests
 ```
 
@@ -144,7 +148,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 188 checks covering the translation sequence, all three axes,
+No hardware needed. 216 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,
@@ -196,9 +200,11 @@ Stated plainly, because none of these is settled by the manual:
    query form while the description says `CURRENT,1` returns `1000,500,500`. The driver
    records whatever comes back verbatim as reference data and never writes it, so either
    reading is harmless.
-11. **`XD`/`YD` are assumed unreadable, not merely undocumented.** No command in 4.2–4.4
-   reports them. If a future firmware adds a query form, the two empty keys in a saved
-   configuration are where it belongs.
+11. **`XD`/`YD` are undocumented, not unreadable.** This assumption was **wrong the other
+   way round**: no command in 4.2–4.4 documents a query form, but firmware 1.03 answers
+   the bare form with `-1` anyway. The two keys in a saved configuration are still empty,
+   now because reading an undocumented form is a decision nobody has taken rather than
+   because the value cannot be had.
 12. **No motion has been tested on hardware.** Communication, the read-only queries,
    error decoding and the configuration capture have been run against a real ProScan
    H31XYZ (firmware 1.03); everything that moves an axis is still simulator-only,

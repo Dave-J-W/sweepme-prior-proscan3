@@ -97,6 +97,11 @@ ERROR_CODES = {
     53: "INTERPOLATOR_NOT_FITTED",
 }
 
+# How far run_self_test_motion() moves the selected axis, in microns, before returning it
+# to where it started. Deliberately small: far enough that a scaling error of a factor of
+# two is obvious on a dial gauge, short enough to be safe on an axis with limited travel.
+SELF_TEST_MOVE_MICRONS = 500.0
+
 # Manual 4.2, '=' and LMT commands. Bit positions of the limit switches:
 #   D07   D06   D05  D04  D03  D02  D01  D00
 #   -4th  +4th  -Z   +Z   -Y   +Y   -X   +X
@@ -501,6 +506,8 @@ class Device(EmptyDevice):
         "restore_index_of_stage",
         "zero_this_axis",
         "report_status",
+        "run_self_test",
+        "run_self_test_motion",
         "save_configuration",
     ]
 
@@ -884,6 +891,306 @@ class Device(EmptyDevice):
             self.message_box("\n".join(lines))
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: could not read the status: {exc}")
+
+    # ----------------------------------------------------------- self-tests
+    #
+    # Two tiers, one action each, so pressing the read-only one can never move an axis.
+    # Both are shaped by a survey of 131 queries against a ProScan H31XYZ running
+    # firmware 1.03 with nothing plugged into it; docs/command-map.md records what that
+    # controller answered. The lesson that drives the design: on a bare controller most
+    # of these readings still work, so a missing stage must be *reported* rather than
+    # failed, and only the tier that actually needs mechanics refuses to run.
+
+    @staticmethod
+    def _self_test_attempt(read):
+        """Run one reading, returning (value, error) so a failure does not abort the test."""
+        try:
+            return read(), None
+        except Exception as exc:  # noqa: BLE001 - a self-test records failures, it does not raise
+            return None, exc
+
+    def run_self_test(self) -> None:
+        """Tier 1: read-only. Moves nothing, needs nothing fitted, takes about a second.
+
+        Every command sent is a bare query, so this is safe to press in any state. It
+        checks what the controller can be asked about itself: firmware, that the two-line
+        DATE response was drained (manual 4.2), standard command mode, the serial number,
+        what is actually fitted, both limit-switch number bases, the axis scaling, and
+        that a rejection still decodes to a documented name.
+
+        Anything unfitted or unreadable is reported as a note, not a failure -- a bare
+        controller answers RES and SS with 0, and that must not read as a broken driver.
+        """
+        try:
+            checks: list[tuple[bool | None, str]] = []
+
+            version, error = self._self_test_attempt(self.get_version)
+            checks.append(
+                (False, f"VERSION could not be read: {error}") if error
+                else (True, f"firmware VERSION {version}"),
+            )
+
+            date, error = self._self_test_attempt(self.get_date_string)
+            checks.append(
+                (False, f"DATE could not be read: {error}") if error
+                else (True, f"DATE: {date}"),
+            )
+
+            # Manual 4.2: DATE spans two lines with no END marker. If the second line were
+            # left in the buffer it would become this next answer, so a COMP that parses
+            # as 0 or 1 is the evidence that the drain worked.
+            mode, error = self._self_test_attempt(self.get_compatibility_mode)
+            if error:
+                checks.append((False, f"COMP could not be read after DATE: {error}"))
+            elif mode == 0:
+                checks.append((True, "COMP 0, standard mode, and the DATE block was drained"))
+            else:
+                checks.append((
+                    False,
+                    f"COMP {mode}: the controller is in compatibility mode. connect() sends "
+                    "COMP,0 to recover; if this persists the controller is ignoring it.",
+                ))
+
+            serial, error = self._self_test_attempt(self.get_serial_number)
+            checks.append(
+                (None, f"SERIAL unreadable: {error}") if error
+                else (True, f"SERIAL {serial}"),
+            )
+
+            moving, error = self._self_test_attempt(self.is_axis_moving)
+            if error:
+                checks.append((False, f"the '$' moving status could not be read: {error}"))
+            else:
+                checks.append((
+                    True if not moving else None,
+                    f"the {self.axis} axis is {'moving' if moving else 'idle'}",
+                ))
+
+            # Manual 4.2: '=' is decimal and latching, LMT is two hex digits and live.
+            # Reading both proves the driver has the number bases the right way round.
+            active, error = self._self_test_attempt(self.get_active_limit_switches)
+            if error:
+                checks.append((False, f"LMT could not be read or decoded: {error}"))
+            else:
+                mine = [
+                    LIMIT_BIT_NAMES[bit]
+                    for bit in self.axis_commands["limit_bits"]
+                    if active & (1 << bit)
+                ]
+                checks.append((
+                    True,
+                    f"LMT = 0x{active:02X}, active now: {self.decode_limit_bits(active)}",
+                ))
+                if len(mine) == len(self.axis_commands["limit_bits"]):
+                    checks.append((
+                        None,
+                        f"both {self.axis} limit switches read active, which is what an "
+                        "unwired axis looks like. A move would be reported as a limit hit.",
+                    ))
+            latch, error = self._self_test_attempt(self.get_limit_switch_latch)
+            checks.append(
+                (False, f"'=' could not be read or decoded: {error}") if error
+                else (True, f"'=' latch (decimal, cleared by this read) = {latch}"),
+            )
+
+            information, error = self._self_test_attempt(self.get_axis_information)
+            if error:
+                checks.append((False, f"STAGE/FOCUS could not be read: {error}"))
+            else:
+                fitted = not any("NONE" in line.upper() for line in information)
+                checks.append((
+                    True if fitted else None,
+                    " / ".join(information)
+                    + ("" if fitted else "  -- run_self_test_motion() will refuse"),
+                ))
+
+            scale, error = self._self_test_attempt(self.determine_user_unit_in_microns)
+            checks.append(
+                (None, f"the user unit is not determinable: {error}") if error
+                else (True, f"user unit = {scale:.6g} µm per user unit"),
+            )
+
+            status, error = self._self_test_attempt(self.get_error_status)
+            checks.append(
+                (False, f"ERRORSTAT could not be read: {error}") if error
+                else (True, "ERRORSTAT: " + " / ".join(status)),
+            )
+
+            # UNTLIMIT,? is fully documented (manual 4.3) but firmware 1.03 rejects it with
+            # COMMAND_NOT_FOUND. Either outcome is a pass: a value proves the query path, a
+            # rejection proves the decoder names the code instead of returning a number.
+            value, error = self._self_test_attempt(lambda: self._query("UNTLIMIT,?"))
+            if error is None:
+                checks.append((True, f"UNTLIMIT,? answered {value!r}; this firmware has it"))
+            elif "(E," in str(error):
+                checks.append((True, f"a rejection decoded to a name -- {error}"))
+            else:
+                checks.append((
+                    False,
+                    f"UNTLIMIT,? failed without a decoded error code: {error}",
+                ))
+
+            self.message_box(self._format_self_test("self-test tier 1 (read-only)", checks))
+        except Exception as exc:  # noqa: BLE001 - an action must not raise
+            self.message_box(f"ProScan III: the read-only self-test stopped with an error: {exc}")
+
+    def run_self_test_motion(self) -> None:
+        """Tier 2: moves the selected axis 0.5 mm and returns it. Needs the axis fitted.
+
+        Refuses, before sending any movement command, if the axis is not fitted, if the
+        scale is not determinable, if the axis is already moving, if the controller is in
+        compatibility mode, or if either of this axis' limit switches is already active --
+        the last of which is what an unwired axis looks like (LMT = 0x0F).
+
+        **The axis needs 0.5 mm of clear travel in the positive direction.** Nothing is
+        homed and nothing is zeroed. If a limit switch is hit during the move the test
+        stops there and does not move again, because the controller position and the
+        mechanical position may no longer agree (manual 4.3).
+        """
+        try:
+            checks: list[tuple[bool | None, str]] = []
+
+            refusal = self._refuse_motion_self_test()
+            if refusal:
+                self.message_box(
+                    f"ProScan III self-test tier 2 (motion): not run -- {refusal}",
+                )
+                return
+
+            scale = self.determine_user_unit_in_microns()
+            start_units = self.get_position_in_user_units()
+            step_units = int(round(SELF_TEST_MOVE_MICRONS / scale))
+            if step_units == 0:
+                self.message_box(
+                    f"ProScan III self-test tier 2 (motion): not run -- one user unit is "
+                    f"{scale:.6g} µm, so a {SELF_TEST_MOVE_MICRONS:g} µm move rounds to zero "
+                    "steps.",
+                )
+                return
+
+            tolerance = getattr(self, "position_tolerance", 2.0)
+            start_um = start_units * scale
+            checks.append((
+                True,
+                f"start position {start_um:.3f} µm ({start_units} user units), moving "
+                f"{step_units * scale:.3f} µm and back, tolerance {tolerance:.3f} µm",
+            ))
+
+            for label, destination_units in (
+                ("out", start_units + step_units),
+                ("back", start_units),
+            ):
+                self.target_position_um = destination_units * scale
+                self.move_to_user_units(destination_units)
+                self.wait_for_end_of_move()
+
+                latch = self.get_limit_switch_latch()
+                hit = [
+                    LIMIT_BIT_NAMES[bit]
+                    for bit in self.axis_commands["limit_bits"]
+                    if latch & (1 << bit)
+                ]
+                if hit:
+                    checks.append((
+                        False,
+                        f"the {label} leg hit the {' and '.join(hit)} limit switch. Stopping "
+                        "here and not moving again: the controller position and the "
+                        f"mechanical position may no longer agree, so re-index the "
+                        f"{self.axis} axis before trusting it.",
+                    ))
+                    break
+
+                arrived_um = self.get_position_in_microns()
+                deviation = abs(arrived_um - self.target_position_um)
+                checks.append((
+                    deviation <= tolerance,
+                    f"{label} leg reached {arrived_um:.3f} µm, wanted "
+                    f"{self.target_position_um:.3f} µm, off by {deviation:.3f} µm",
+                ))
+
+            checks.append((
+                None,
+                "A move of the right size in the wrong direction is an XD/YD/ZD setting on "
+                "the controller, not a driver fault (manual 4.3, 4.4). A move the right "
+                "direction but the wrong size means the scaling is wrong -- check the user "
+                "unit above against a dial gauge before recording any data.",
+            ))
+
+            self.message_box(self._format_self_test("self-test tier 2 (motion)", checks))
+        except Exception as exc:  # noqa: BLE001 - an action must not raise
+            self.message_box(
+                f"ProScan III: the motion self-test stopped with an error: {exc} "
+                f"The {self.axis} axis may not be back where it started; check its position "
+                "before recording data.",
+            )
+
+    def _refuse_motion_self_test(self) -> str:
+        """Return why the motion self-test must not run, or an empty string if it may."""
+        try:
+            information = self.get_axis_information()
+        except Exception as exc:  # noqa: BLE001
+            return f"the axis information could not be read ({exc})"
+        if any("NONE" in line.upper() for line in information):
+            return (
+                f"{' / '.join(information)}, so there is nothing on the {self.axis} axis to "
+                "move. Attach a stage or focus axis first."
+            )
+
+        try:
+            if self.get_compatibility_mode() != 0:
+                return "the controller is in compatibility mode; connect() first, to send COMP,0"
+        except Exception as exc:  # noqa: BLE001
+            return f"COMP could not be read ({exc})"
+
+        try:
+            if self.is_axis_moving():
+                return f"the {self.axis} axis is already moving"
+        except Exception as exc:  # noqa: BLE001
+            return f"the moving status could not be read ({exc})"
+
+        try:
+            scale = self.determine_user_unit_in_microns()
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f"the user unit could not be determined ({exc}), so a "
+                f"{SELF_TEST_MOVE_MICRONS:g} µm move has no defined size"
+            )
+        if scale <= 0:
+            return f"the user unit came back as {scale}"
+
+        try:
+            active = self.get_active_limit_switches()
+        except Exception as exc:  # noqa: BLE001
+            return f"LMT could not be read ({exc})"
+        hit = [
+            LIMIT_BIT_NAMES[bit]
+            for bit in self.axis_commands["limit_bits"]
+            if active & (1 << bit)
+        ]
+        if hit:
+            return (
+                f"the {' and '.join(hit)} limit switch is already active (LMT = 0x{active:02X}). "
+                "Move the axis clear of its limits by hand, or check that the stage is wired -- "
+                "an unwired axis reads every limit as active."
+            )
+        return ""
+
+    @staticmethod
+    def _format_self_test(title: str, checks: list[tuple[bool | None, str]]) -> str:
+        """Render a self-test result: a count, then one line per check."""
+        passed = sum(1 for ok, _ in checks if ok is True)
+        failed = [text for ok, text in checks if ok is False]
+        total = sum(1 for ok, _ in checks if ok is not None)
+
+        lines = [f"ProScan III {title}: {passed}/{total} checks passed."]
+        if failed:
+            lines.append("")
+            lines.append("FAILED:")
+            lines.extend(f"  - {text}" for text in failed)
+        lines.append("")
+        for ok, text in checks:
+            lines.append(f"  {'ok  ' if ok is True else 'FAIL' if ok is False else 'note'}  {text}")
+        return "\n".join(lines)
 
     def save_configuration(self) -> None:
         """Capture the controller's current settings into a named file.

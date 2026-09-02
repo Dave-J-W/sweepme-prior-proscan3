@@ -586,6 +586,139 @@ def test_actions(driver) -> None:
             check(True, f"action {name}() reports instead of raising on a dead port")
 
 
+class NoStageFitted(ProScanIIISimulator):
+    """A controller with nothing plugged into it, as seen on the bench: firmware 1.03
+    answers RES and SS with 0 and STAGE with NONE, and every limit switch reads active.
+    """
+
+    def _cmd_res(self, arguments):
+        self.out.append("0")
+
+    def _cmd_ss(self, arguments):
+        self.out.append("0")
+
+    def _cmd_stage(self, arguments):
+        self.out.extend(["STAGE = NONE", "END"])
+
+
+def test_self_tests(driver) -> None:
+    """The two self-test tiers: what tier 1 reports, and what tier 2 refuses to do."""
+    print("\n[31] self-test actions")
+
+    def movement_commands(instrument):
+        return [
+            command
+            for command in instrument.log
+            if command.upper().startswith(("GX", "GY", "GZ", "GR", "G,", "SIS", "SIZ", "RIS"))
+        ]
+
+    # --- tier 1, healthy controller
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    device.messages = []
+    device.run_self_test()
+    report = "\n".join(device.messages)
+    check("FAIL" not in report, "tier 1 passes cleanly on a healthy controller")
+    check("firmware VERSION 116" in report, "tier 1 reports the firmware version")
+    check("user unit = 1 µm" in report, "tier 1 reports the user unit")
+    check("ERRORSTAT" in report, "tier 1 reports the controller's error state")
+    check(not movement_commands(instrument), "tier 1 sends no movement command")
+
+    # --- tier 1, nothing fitted: the case that used to collapse report_status()
+    device = make_device(driver, NoStageFitted())
+    device.connect()
+    device.initialize()
+    device.messages = []
+    device.run_self_test()
+    report = "\n".join(device.messages)
+    check("firmware VERSION 116" in report, "tier 1 still reports the version with no stage")
+    check(
+        "note  the user unit is not determinable" in report,
+        "tier 1 calls an unreadable user unit a note, not a failure",
+    )
+    check(
+        "run_self_test_motion() will refuse" in report,
+        "tier 1 says which tier the missing stage rules out",
+    )
+    check("FAIL" not in report, "an unfitted controller is not reported as a driver failure")
+
+    # --- tier 2 refuses when there is nothing to move
+    instrument = NoStageFitted()
+    device = make_device(driver, instrument)
+    device.connect()
+    device.initialize()
+    device.messages = []
+    device.run_self_test_motion()
+    report = "\n".join(device.messages)
+    check("not run" in report, "tier 2 refuses when the axis is not fitted")
+    check("STAGE = NONE" in report, "and says what it read to decide that")
+    check(not movement_commands(instrument), "and sends no movement command when refusing")
+
+    # --- tier 2 refuses when a limit switch is already active
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    instrument.limit_low["X"] = 0          # the axis sits at 0, so -X reads active
+    device.messages = []
+    before = len(movement_commands(instrument))
+    device.run_self_test_motion()
+    report = "\n".join(device.messages)
+    check("not run" in report, "tier 2 refuses when a limit switch is already active")
+    check("-X limit switch is already active" in report, "and names the switch")
+    check(
+        len(movement_commands(instrument)) == before,
+        "and sends no movement command when refusing on a limit",
+    )
+
+    # --- tier 2 on a healthy controller: out 0.5 mm, then back
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    instrument.position_microsteps["X"] = 10_000 * 25
+    device.messages = []
+    device.run_self_test_motion()
+    report = "\n".join(device.messages)
+    check("out leg reached" in report, "tier 2 reports the outward leg")
+    check("back leg reached" in report, "tier 2 reports the return leg")
+    check("FAIL" not in report, "tier 2 passes on a healthy controller")
+    check(
+        instrument.position_in_user_units("X") == 10_000,
+        f"tier 2 leaves the axis where it started, got "
+        f"{instrument.position_in_user_units('X')}",
+    )
+    targets = [command for command in instrument.log if command.upper().startswith("GX,")]
+    check(
+        targets == ["GX,10500", "GX,10000"],
+        f"tier 2 moves exactly 500 µm out and back, sent {targets}",
+    )
+    check(
+        not instrument.commands_matching("Z"),
+        "tier 2 never sends the destructive bare 'Z'",
+    )
+    check(
+        not instrument.commands_matching("SIS") and not instrument.commands_matching("RIS"),
+        "tier 2 never homes",
+    )
+
+    # --- a limit hit mid-test stops it, and it does not move again
+    class TightTravel(ProScanIIISimulator):
+        """An axis with less than the test move left in the positive direction."""
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.limit_high["X"] = 200 * 25
+
+    instrument = TightTravel()
+    device = bring_up(driver, instrument)
+    device.messages = []
+    device.run_self_test_motion()
+    report = "\n".join(device.messages)
+    check("limit switch" in report, "a limit hit during the move is reported")
+    check(
+        len([c for c in instrument.log if c.upper().startswith("GX,")]) == 1,
+        "and the test stops there rather than attempting the return leg",
+    )
+    check("re-index" in report, "and it says to re-index before trusting the position")
+
+
 def test_interface_declaration(driver) -> None:
     """Only the interfaces the instrument has, and the manual's port settings."""
     print("\n[16] interface and metadata")
@@ -1113,6 +1246,7 @@ def main() -> int:
         test_configuration_serial_mismatch,
         test_configuration_restore_order,
         test_configuration_action_never_raises,
+        test_self_tests,
     ):
         test(driver)
 

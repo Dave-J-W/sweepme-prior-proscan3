@@ -27,9 +27,11 @@ that does and does not license.
 | Compatibility-mode recovery (`COMP,0`) | done |
 | Homing and zeroing as action buttons | done |
 | Read-only status diagnostic | done |
+| Read-only self-test (tier 1) | done, **9/9 on hardware**, X and Z |
+| Motion self-test, ±500 µm (tier 2) | written; **its refusals are verified on hardware, the move itself is not** |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **188/188**, exit 0, across 30 sections.
+`python tests/test_proscan3_virtual.py` → **216/216**, exit 0, across 31 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -38,7 +40,11 @@ Sections 1–20 cover motion, scaling, error handling and the failure paths; 21�
 the configuration capture, including that it sends queries and nothing else, that the
 hot-key-scaled `O`/`OF` values are recorded but never replayed, that `UPR,Z` is restored
 before the focus scaling that depends on it, and that a saved name cannot escape the
-configuration folder.
+configuration folder. Section 31 covers the two self-test tiers: that tier 1 sends no
+movement command and demotes an unfitted axis to a note rather than a failure, and that
+tier 2 refuses on an unfitted axis or an already-active limit switch, moves exactly
+±500 µm, returns the axis to where it started, and stops without a second move if it hits
+a limit.
 
 ## What the bench controller settled
 
@@ -54,7 +60,14 @@ rejection decoder, and `save_configuration()` — 34 of 39 settings answered, `X
 left empty as designed. Real response formats are in
 `docs/command-map.md`, "Confirmed against hardware".
 
-Three things the bare controller taught us:
+A second pass then swept **131 query commands** across manual 4.2–4.8, 4.11–4.13,
+4.16–4.17 and Appendix F — every subsystem the controller has a port for, including the
+ones this driver does not control: filter wheels, shutters, LEDs, the nosepiece, the OEM
+axes, the trigger board, the encoders and the fourth axis. No setter and no movement
+command was sent. The full results, and five traps they exposed, are in
+`docs/command-map.md`, "Confirmed against hardware".
+
+What the bare controller taught us:
 
 1. **The zero-scale guard holds.** `RES,S`, `SS`, `SSZ` and `UPR,Z` all answer `0`, and
    `determine_user_unit_in_microns()` raises on both X and Z rather than recording
@@ -67,6 +80,21 @@ Three things the bare controller taught us:
    `SWLL`/`SWLH` answer `STRING_PARSE (E,4)`. This bears directly on the out-of-scope
    item below about software limits as a safety envelope: on this firmware there is
    nothing to read back, so a limits feature cannot verify it left them as it found them.
+4. **`XD` and `YD` are readable after all.** Both answer `-1`, though the manual gives
+   them a setter row only. The "one real gap" in the configuration capture turns out to
+   be a choice about trusting undocumented firmware behaviour rather than a limit on what
+   can be known. Nothing has been changed on the strength of it yet.
+5. **The error decoder survives an undocumented code.** `E,128` — absent from the V 1.16
+   error table, which stops at 53 — comes back from every `OEM,n,<property>` and every
+   `NP` form. The driver reports `UNKNOWN_ERROR (E,128)` and raises, which is right, and
+   is now observed rather than assumed. Six documented codes were also decoded against
+   real rejections: `E,4`, `E,5`, `E,10`, `E,17`, `E,20`, `E,40`.
+6. **Three commands cannot be used to detect missing hardware**, which matters for any
+   future feature that tries to discover what is fitted. `$,1`…`$,9` all answer `0`
+   ("not moving") for axes that do not exist; `TRIGGERRES,X/Y/Z` answers `0` rather than
+   `E,52` with no trigger board; and `FILTER,w` / `SHUTTER,s` answer an info block saying
+   `= NONE`. Use `?`, or the forms that do reject — `7,w,F` gives `E,17` and `8,s` gives
+   `E,20`.
 
 Also worth knowing before the next hardware session: with no stage wired, `LMT` answers
 `0F`, so **all four X/Y limit switches read as active**. Any move attempt on a bare
@@ -147,7 +175,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 188 checks:
+Honest limits of the 216 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`
@@ -159,9 +187,12 @@ Honest limits of the 188 checks:
   it. The response formats now confirmed are listed in `docs/command-map.md`; treat the
   rest as inference. Note also that the one controller seen so far is firmware 1.03, so
   a command it rejects may simply be newer than it.
-- **`XD`/`YD` cannot be captured.** No command in 4.2–4.4 reports the mechanical
-  direction of a commanded stage move. A saved configuration leaves both keys empty
-  rather than guessing. This is a documented gap, not a bug.
+- **`XD`/`YD` are not captured, by choice rather than necessity.** No command in 4.2–4.4
+  documents a way to read the mechanical direction of a commanded stage move — but
+  firmware 1.03 answers bare `XD` and `YD` with `-1` regardless. A saved configuration
+  still leaves both keys empty. That is now a decision about relying on undocumented
+  firmware behaviour, weighed in `docs/configuration-capture.md`, not a gap in what is
+  knowable.
 - **Encoded axes are not modelled.** `PZ` on an encoded focus axis only takes effect
   inside the encoder range; the driver reads back to check, but the simulator never
   exercises the failing case. Same for the encoder reference-mark pass in `SIS`.
