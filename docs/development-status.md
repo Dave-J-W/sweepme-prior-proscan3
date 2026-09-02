@@ -6,21 +6,25 @@ feature).
 
 ## Where the work stands
 
-Implemented and verified against the simulator. **Communication, every read-only query,
-error decoding, the configuration capture, the joystick lockout, the TTL port and — with
-an H101A stage now attached — `configure()` and the user-unit scale have all been run
-against a real controller.** What has still never happened is a *move*: no `G` command has
-ever been sent to a real motor, so the end-of-move `R` accounting, the stop and timeout
-paths, arrival tolerance, backlash and limit detection during travel remain
-simulator-only. See "What the bench controller settled" below for what that does and does
-not license.
+Implemented and verified against a real controller with an H101A stage: communication,
+every read-only query, error decoding, the configuration capture, the joystick lockout,
+the TTL port, `configure()`, the user-unit scale, **and motion**. Moves of 100 µm, 500 µm,
+1000 µm, 2 mm and 10 mm all landed with **0.000 µm error** and returned to their start.
+
+Getting there found the worst defect in the driver's history, and one only hardware could
+find: **`R` is a command acknowledgement on firmware 1.03, not the end-of-move signal
+manual 4.1 promises.** The driver believed the manual, so `reach()` returned ~20 ms into
+every travel. See "The motion session" below; the fix is in `wait_for_end_of_move()`.
+
+Still simulator-only: the SweepMe! stop button mid-move (the timeout path is covered), and
+anything on the focus axis, which is not fitted.
 
 | Capability | State |
 |---|---|
-| Absolute one-dimensional moves on X, Y or the focus axis | done |
+| Absolute one-dimensional moves on X, Y or the focus axis | done, **X verified on an H101A: 100 µm to 10 mm, 0.000 µm error** |
 | Relative moves, resolved against a fresh position read | done |
 | Micron ↔ user-unit conversion, read from the controller | done, `RES` then `UPR,Z`/`SS` fallbacks. **`RES` vs `SS`/`STAGE` cross-check confirmed on an H101A: both give 1 µm/unit** |
-| End-of-move waiting without sending commands mid-move | done |
+| End-of-move waiting | **rewritten after hardware**: `R` is an ack on firmware 1.03, so `$` is polled until idle |
 | Stop button and move timeout, both ending in a controlled `I` | done |
 | Limit-switch detection after each move | done |
 | Arrival verification against a tolerance | done |
@@ -33,10 +37,10 @@ not license.
 | Read-only status diagnostic | done |
 | Read-only self-test (tier 1) | done, **12/12 on hardware with a stage**, 10/10 bare |
 | Joystick lockout self-test (tier 2) | done, **5/5 on hardware** with a joystick attached |
-| Motion self-test, ±500 µm (tier 3) | written; **its refusals are verified on hardware, the move itself is not** |
+| Motion self-test, ±500 µm (tier 3) | done, **3/3 on hardware**, 0.000 µm error both legs |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **271/271**, exit 0, across 32 sections.
+`python tests/test_proscan3_virtual.py` → **281/281**, exit 0, across 33 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -51,7 +55,10 @@ tier 2 confirms the joystick lockout through `?` instead of trusting the acknowl
 fails against firmware that ignores `H,1`, restores the joystick, and refuses while a run
 holds the lockout; and that tier 3 refuses on an unfitted axis or an already-active limit
 switch, moves exactly ±500 µm, returns the axis to where it started, and stops without a
-second move if it hits a limit. Section 32 covers the TTL port: that an empty GUI field
+second move if it hits a limit. Section 33 covers the 'R'-is-an-acknowledgement finding: that a move measures where it
+arrived rather than where it started, that reach() actually waits out the travel, that the
+fix works against manual-4.1 firmware too, and that a stalled axis still times out into an
+'I'. Section 32 covers the TTL port: that an empty GUI field
 writes nothing at all, that a requested pattern is restored to the *pre-run* state rather
 than zeroed, that every write form sends the level explicitly so a bare `TTL,n` can never
 be emitted, that `TTL_IN` is refused as a write target, that a bad hex entry is rejected
@@ -159,6 +166,44 @@ ONCE AT INITIAL CONNECTION OF STAGE TO CONTROLLER IN ORDER TO ESTABLISH A UNIQUE
 POSITION WHICH IS PERMANENTLY REMEMBERED BY THE CONTROLLER." Until it is, absolute
 positions are relative to whatever the controller's counter happened to hold. It drives
 into both hard limits, so it stays an action button.
+
+### The motion session — and the defect it found
+
+With travel cleared by the operator, the first `G` command ever sent to a real motor
+**failed**, and failed usefully. A commanded 100 µm move reported 84 µm short. The stage
+was fine: reading the position a moment later showed it had arrived exactly. What had gone
+wrong was the *waiting*.
+
+Manual 4.1 says a movement command "answers 'R' at the END of the move". On firmware 1.03
+it does not: `R` arrives 19–26 ms after the command **regardless of distance** — the serial
+round trip — and no second `R` follows. Measured travel was 0.159 s for 500 µm, 0.303 s for
+2 mm, 0.655 s for 10 mm, so the gap grows with distance while `R` does not. The port was
+drained and verified empty first, ruling out a stale response. Full table in
+`docs/command-map.md`, "'R' is a command acknowledgement, not the end of the move".
+
+So `reach()` was returning at the start of every travel and `measure()` was reading a
+position a few tens of microns in. **Every recorded position would have been wrong**, by an
+amount that grows with move length and looks like a settling or backlash problem rather
+than a protocol bug.
+
+**The arrival-tolerance check is what saved it.** 84 µm against a 2 µm tolerance made it a
+loud `RuntimeError` instead of a data point. That check existed only because of this
+repo's rule that a suspect reading must raise rather than become data — it was written
+against the simulator, for a failure nobody had seen, and it caught a real one.
+
+`wait_for_end_of_move()` now consumes `R` and then polls `$` until the axis is idle, which
+is correct under both behaviours and still respects 4.1's rule about not sending anything
+before `R` is read. Afterwards: 100 µm, 500 µm, 1000 µm, 2 mm and 10 mm all with 0.000 µm
+error, and `run_self_test_motion()` at **3/3 on hardware**.
+
+Two lessons worth carrying:
+
+- **The simulator was the reason the bench stayed green.** It emitted `R` at the end of the
+  simulated move, faithfully implementing the manual — so it agreed with the driver's wrong
+  assumption. A simulator built from the same document as the driver cannot catch the
+  document being wrong. It now defaults to the observed behaviour.
+- **A tolerance check is not a nicety.** It was the only thing standing between this and
+  months of quietly wrong data.
 
 ### The joystick session
 
@@ -287,7 +332,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 271 checks:
+Honest limits of the 281 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`

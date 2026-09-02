@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 271 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 281 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -134,7 +134,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 271/271
+python tests/test_proscan3_virtual.py     # expect 281/281
 ruff check src tests
 ```
 
@@ -152,7 +152,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 271 checks covering the translation sequence, all three axes,
+No hardware needed. 281 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,

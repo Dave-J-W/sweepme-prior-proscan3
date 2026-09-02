@@ -10,6 +10,7 @@ Exits non-zero if any check fails, so it works as a pre-commit gate.
 
 from __future__ import annotations
 
+import time
 import configparser
 import importlib.util
 import shutil
@@ -470,10 +471,14 @@ def test_error_decoding(driver) -> None:
         contains="Invalid PX",
     )
 
-    # NOT_IDLE: setting a position while the axis is moving.
+    # NOT_IDLE: setting a position while the axis is moving. The move's 'R' has to be
+    # consumed first -- on firmware 1.03 it arrives as an acknowledgement, so leaving it
+    # unread would make it the answer to the next command.
     instrument = ProScanIIISimulator(stall_forever=True)
     device = bring_up(driver, instrument)
     device.move_to_user_units(5000)
+    device._wait_for_response("R", timeout=1.0)
+    check(device.is_axis_moving(), "the axis is still moving after its 'R' acknowledgement")
     expect_error(
         lambda: device.set_position_in_user_units(0),
         "setting a position mid-move raises NOT_IDLE",
@@ -835,6 +840,65 @@ def test_self_tests(driver) -> None:
         "and the test stops there rather than attempting the return leg",
     )
     check("re-index" in report, "and it says to re-index before trusting the position")
+
+
+def test_end_of_move_is_not_the_acknowledgement(driver) -> None:
+    """'R' acknowledges the command on firmware 1.03; the move is not over when it lands.
+
+    Measured on an H101A: 'R' at 19-26 ms whatever the distance, travel 0.159 s / 0.303 s
+    / 0.655 s for 500 µm / 2 mm / 10 mm. A driver that treats 'R' as end-of-move measures
+    the position at the START of the travel -- a 100 µm move came back 84 µm short on
+    hardware, and only measure()'s tolerance check made that an error rather than data.
+    """
+    print("\n[33] 'R' is an acknowledgement, not end-of-move")
+
+    # Slow the simulated axis right down so the gap is unmissable, the way it is in reality.
+    instrument = ProScanIIISimulator(microsteps_per_second=25 * 2000)   # 2 mm/s
+    device = bring_up(driver, instrument)
+
+    began = time.time()
+    result = run_point(device, 1000.0)
+    elapsed = time.time() - began
+
+    check(
+        result[0] == 1000.0,
+        f"a 1000 µm move measures where it ARRIVED, not where it started (got {result[0]})",
+    )
+    check(
+        instrument.position_in_user_units("X") == 1000,
+        "and the simulated axis really is at the target",
+    )
+    check(
+        elapsed >= 0.4,
+        f"reach() waited for the travel, not just the ack ({elapsed:.3f} s for a 0.5 s move)",
+    )
+    check(not instrument.active_move, "no move is left in flight")
+    check(instrument.out == [], "and no unread response is left in the buffer")
+
+    # The same driver must still work against firmware that matches manual 4.1.
+    instrument = ProScanIIISimulator(
+        microsteps_per_second=25 * 2000,
+        acknowledges_move_immediately=False,
+    )
+    device = bring_up(driver, instrument)
+    result = run_point(device, 1000.0)
+    check(
+        result[0] == 1000.0,
+        "the fix also works where 'R' really does mean end-of-move (manual 4.1 firmware)",
+    )
+    check(instrument.out == [], "with no unread response there either")
+
+    # A stalled axis must still time out rather than hang for ever on '$'.
+    instrument = ProScanIIISimulator(stall_forever=True)
+    device = bring_up(driver, instrument, **{"Move timeout in s": "0.5"})
+    device.set_value(1000.0)
+    device.apply()
+    expect_error(
+        device.reach,
+        "an axis that never stops moving still times out and is stopped with 'I'",
+        contains="did not report end of move",
+    )
+    check("I" in instrument.log, "and 'I' was actually sent")
 
 
 def test_ttl_port(driver) -> None:
@@ -1484,6 +1548,7 @@ def main() -> int:
         test_configuration_restore_order,
         test_configuration_action_never_raises,
         test_self_tests,
+        test_end_of_move_is_not_the_acknowledgement,
         test_ttl_port,
     ):
         test(driver)

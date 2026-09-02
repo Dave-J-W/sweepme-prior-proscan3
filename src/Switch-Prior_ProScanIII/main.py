@@ -1851,9 +1851,12 @@ class Device(EmptyDevice):
     def move_to_user_units(self, position: int) -> None:
         """Start an absolute move of this axis (GX / GY / GZ, manual 4.3, 4.4).
 
-        Write-only here: the controller answers 'R' at the END of the move, which
-        wait_for_end_of_move() collects. Manual 4.1: no further commands should be sent
-        until that 'R' has been read.
+        Write-only here: the 'R' is collected by wait_for_end_of_move(), and manual 4.1
+        requires that no further command be sent until it has been read. **Anything that
+        calls this must consume that 'R'** or the next query reads it as its own answer.
+
+        Note that on firmware 1.03 the 'R' arrives ~20 ms after the command rather than at
+        the end of the move, so it is an acknowledgement -- see wait_for_end_of_move().
         """
         self._write(f"{self.axis_commands['goto']},{int(position)}")
 
@@ -2223,14 +2226,26 @@ class Device(EmptyDevice):
     # ------------------------------------------------------- motion waiting
 
     def wait_for_end_of_move(self) -> None:
-        """Wait for the 'R' that the controller sends when the move finishes (manual 4.1).
+        """Wait until the axis has actually stopped, not merely until 'R' arrives.
 
-        No commands are sent while the move is in progress, because the manual requires
-        the application to wait for 'R' before sending anything else. The wait polls the
-        input buffer instead, so SweepMe!'s stop button stays responsive.
+        Manual 4.1 says a movement command "answers 'R' at the END of the move", and this
+        driver believed it. **Firmware 1.03 does not behave that way.** Measured on an
+        H101A stage: 'R' arrives 19-26 ms after the command *regardless of distance* --
+        that is the serial round trip -- while the travel itself took 0.159 s for 500 µm,
+        0.303 s for 2 mm and 0.655 s for 10 mm. So 'R' is a command acknowledgement, and
+        waiting only for it returned control at the START of the travel. A 100 µm move
+        then measured 84 µm short, and only the arrival-tolerance check in measure()
+        turned that into an error instead of a plausible-looking data point.
+
+        So: consume 'R' first, as the manual requires before sending anything else, and
+        then poll '$' until the axis reports idle. This is correct under both behaviours --
+        on firmware that really does answer 'R' at the end, the axis is already idle and
+        the poll returns immediately.
         """
+        deadline = time.time() + self.move_timeout
         try:
             self._wait_for_response("R", timeout=self.move_timeout)
+            self._wait_until_axis_idle(deadline)
         except TimeoutError:
             # Stop the axis before giving up, so the run does not abort with the stage
             # still travelling.
@@ -2243,6 +2258,22 @@ class Device(EmptyDevice):
                 "is genuinely this slow."
             )
             raise TimeoutError(msg) from None
+
+    def _wait_until_axis_idle(self, deadline: float) -> None:
+        """Poll '$' until this axis stops moving, honouring the user's stop button.
+
+        Only called after 'R' has been read, so manual 4.1's requirement that nothing be
+        sent until then is still met.
+        """
+        while self.is_axis_moving():
+            if self._is_stopped():
+                # Manual 4.2: 'I' stops in a controlled manner and empties the queue.
+                self._write("I")
+                self._drain()
+                return
+            if time.time() > deadline:
+                raise TimeoutError
+            time.sleep(0.01)
 
     def _wait_for_response(self, expected: str, timeout: float) -> None:
         """Poll until the controller sends 'expected', honouring the user's stop button."""

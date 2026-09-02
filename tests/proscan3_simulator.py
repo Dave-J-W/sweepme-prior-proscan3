@@ -59,6 +59,7 @@ class ProScanIIISimulator:
         supports_res: bool = True,
         supports_upr: bool = True,
         extra_r_after_stop: bool = False,
+        acknowledges_move_immediately: bool = True,
         microsteps_per_user_unit: dict[str, int] | None = None,
         microsteps_per_micron: dict[str, int] | None = None,
         microsteps_per_second: float = 2.0e6,
@@ -78,6 +79,10 @@ class ProScanIIISimulator:
         # Whether an aborted move also emits its own end-of-move 'R' in addition to the
         # one 'I' answers with. The manual does not say, so the driver must survive both.
         self.extra_r_after_stop = extra_r_after_stop
+        # True  = firmware 1.03: 'R' acknowledges the command, ~20 ms in (the DEFAULT,
+        #         because it is what the real controller does)
+        # False = manual 4.1 as written: 'R' arrives at the end of the move
+        self.acknowledges_move_immediately = acknowledges_move_immediately
         self.joystick_enabled = True
         # Tracked separately because '?' reports the XY joystick only: H,3 disables Z
         # while the '?' line still reads ACTIVE (observed on firmware 1.03).
@@ -200,7 +205,10 @@ class ProScanIIISimulator:
             axis = self.active_move["axis"]
             self.position_microsteps[axis] = self.active_move["target"]
             self.active_move = None
-            self.out.append("R")
+            # Only firmware that matches manual 4.1 emits 'R' here. Firmware 1.03 emitted
+            # it when the command was accepted instead -- see _begin_move.
+            if not self.acknowledges_move_immediately:
+                self.out.append("R")
 
         if self.active_move is None and self.move_queue:
             axis, target_user_units = self.move_queue.pop(0)
@@ -225,6 +233,15 @@ class ProScanIIISimulator:
             "started_at": time.time(),
             "ends_at": time.time() + duration,
         }
+
+        # Measured on firmware 1.03 with an H101A: 'R' comes back 19-26 ms after the
+        # command whatever the distance, while the travel took 0.159 s / 0.303 s / 0.655 s
+        # for 500 µm / 2 mm / 10 mm. So it acknowledges the command; it does not report the
+        # end of the move, as manual 4.1 claims. This is the default here because it is
+        # what the one controller we have actually does, and a driver that trusts the
+        # manual must fail against it.
+        if self.acknowledges_move_immediately:
+            self.out.append("R")
 
     def _stop(self, *, immediate: bool) -> None:
         """Implement 'I' (controlled) and 'K' (immediate). Both empty the queue."""

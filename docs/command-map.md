@@ -31,9 +31,9 @@ rather than raising.
 | `get_compatibility_mode` | `COMP` | `0` standard, `1` compatibility | 4.2 |
 | `set_compatibility_mode` | `COMP,0` | `0` | 4.2 |
 | `set_error_reporting_numeric` | `ERROR,0` | `0` | 4.2 |
-| `move_to_user_units` (X) | `GX,<n>` | `R` at end of move | 4.3 |
-| `move_to_user_units` (Y) | `GY,<n>` | `R` at end of move | 4.3 |
-| `move_to_user_units` (Z) | `GZ,<n>` | `R` at end of move | 4.4 |
+| `move_to_user_units` (X) | `GX,<n>` | `R` — **an acknowledgement, not end-of-move**, see below | 4.3 |
+| `move_to_user_units` (Y) | `GY,<n>` | `R` — as above | 4.3 |
+| `move_to_user_units` (Z) | `GZ,<n>` | `R` — as above | 4.4 |
 | `get_position_in_user_units` | `PX` / `PY` / `PZ` | position in user units | 4.3, 4.4 |
 | `set_position_in_user_units` | `PX,<n>` / `PY,<n>` / `PZ,<n>` | `0`; `E,2` while moving | 4.3, 4.4 |
 | `is_axis_moving` | `$,X` / `$,Y` / `$,Z` | `0` or `1` | 4.2 |
@@ -218,6 +218,39 @@ Two commands that look safe and are not:
 - **`BUTTON b,f` is write-only and persistent.** It *reprograms* what a joystick button
   does (manual 4.14), and there is no read form for the binding. It is also CS152-only.
   Button *presses*, however, are observable — through the TTL port, see below.
+
+### 'R' is a command acknowledgement, not the end of the move
+
+**The most consequential hardware finding, and the manual is wrong about it for this
+firmware.** Manual 4.1 says a movement command "answers 'R' at the END of the move", and
+the driver was built on that. Measured on an H101A at `SMS`/`SAS` = 100:
+
+| Move | `R` arrives | `$` goes idle | Travel after `R` | Position error if measured at `R` |
+|---|---|---|---|---|
+| 500 µm | 0.026 s | 0.159 s | 0.134 s | 437 µm |
+| 2 mm | 0.019 s | 0.303 s | 0.284 s | 1984 µm |
+| 10 mm | 0.023 s | 0.655 s | 0.632 s | 9984 µm |
+
+`R` lands at 19–26 ms **whatever the distance** — that is the serial round trip — while the
+travel time scales with distance. Only one line arrives per move: there is no second `R` at
+the end. The port was drained and confirmed empty beforehand, so this is not a stale
+response.
+
+The consequence was that `reach()` returned at the *start* of the travel and `measure()`
+read a position a few tens of microns in. A commanded 100 µm move reported 84 µm short.
+**What caught it was the arrival-tolerance check in `measure()`** — 84 µm against a 2 µm
+tolerance — which turned a plausible-looking data point into a loud failure. Without that
+check the driver would have recorded wrong positions indefinitely.
+
+`wait_for_end_of_move()` now consumes `R` and then polls `$` until the axis reports idle.
+That ordering still honours manual 4.1's rule that nothing be sent until `R` has been read,
+and it is correct under *both* behaviours: on firmware that really answers `R` at the end,
+the axis is already idle and the poll returns at once. The simulator defaults to the
+observed firmware-1.03 behaviour, with `acknowledges_move_immediately=False` available for
+the documented one, and section 33 of the bench covers both.
+
+Timing for reference, same stage: 100 µm took 0.11 s, 1000 µm 0.26 s end to end through
+the driver. The `Move timeout in s` default of 60 is generous by two orders of magnitude.
 
 ### The joystick is a PS3J100/D, which changes what applies
 
