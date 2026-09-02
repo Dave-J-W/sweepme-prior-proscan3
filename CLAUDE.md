@@ -73,9 +73,16 @@ git log --format='%an <%ae>|%cn <%ce>' | sort -u
 
 ```bash
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # the gate: must print 183/183 and exit 0
+python tests/test_proscan3_virtual.py     # the gate: must print 188/188 and exit 0
 ruff check src tests
 ```
+
+**Run the gate on Python 3.9.** That is what `pyproject.toml` pins ruff to
+(`target-version = "py39"`) and what SweepMe! 1.5.6 ships, so it is the floor the driver
+has to clear. Newer syntax passes on a 3.12 interpreter and fails on the one that matters:
+`zip(..., strict=False)` in the simulator once made the bench 182/183, and because actions
+swallow exceptions into `message_box` it presented as a driver bug in `zero_this_axis()`
+rather than as a syntax floor. A green run on 3.12 alone is not evidence.
 
 The test bench is a plain script, not pytest, and exits non-zero on any failure. Adding
 a GUI parameter cannot break the tests, because `make_device()` starts from the driver's
