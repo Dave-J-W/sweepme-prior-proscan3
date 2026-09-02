@@ -1056,6 +1056,13 @@ def test_homing_uses_hardware_defaults(driver) -> None:
     check(instrument.acceleration["X"] == 37, "and the acceleration")
     check(instrument.s_curve["X"] == 55, "and the jerk")
     check("restored" in report, "the message says what was restored")
+    # Manual 4.3 promises 0,0, but the bench H101A reproducibly leaves X at 4 user units,
+    # so the action reports the position it reached rather than asserting success.
+    check("Position now:" in report, "the message reports where the index actually landed")
+    check(
+        "Limit switches active:" in report,
+        "and which limit switches it is sitting on",
+    )
 
     # SIS drives into both hard limits and takes time. 'R' is only an acknowledgement on
     # firmware 1.03, so the action must wait for X *and* Y to stop -- SIS acts on the

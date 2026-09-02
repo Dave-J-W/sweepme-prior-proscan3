@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 319 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 321 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -54,7 +54,7 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 | Action | What it does |
 |---|---|
 | `stop_motion` | `I` — controlled stop, empties the command queue |
-| `set_index` | `SIS` (X/Y) or `SIZ` (Z). **Moves into the hard limits** and sets zero there. `SIS` indexes and zeroes the **whole X/Y stage** to 0,0, not just the selected axis. Never automatic; press it deliberately, normally once after installation. **Runs at the hardware default speed/acceleration/jerk (100 each)** and restores the previous values afterwards, so an endstop is not hit at a speed tuned for a scan |
+| `set_index` | `SIS` (X/Y) or `SIZ` (Z). **Moves into the hard limits** and sets zero there. `SIS` acts on the **whole X/Y stage**, not just the selected axis. Never automatic; press it deliberately, normally once after installation. **Runs at the hardware default speed/acceleration/jerk (100 each)** and restores the previous values afterwards, so an endstop is not hit at a speed tuned for a scan. Reports the position it reached and the switches it is sitting on — the manual promises 0,0, but the bench H101A reproducibly leaves X at 4 user units with Y at exactly 0. It indexes against **+X/+Y**, so travel afterwards is negative. Took 7.54 s from mid-travel |
 | `restore_index_of_stage` | `RIS` — re-synchronise the whole X/Y stage with the controller after it was moved by hand while powered off. **Moves the stage.** Requires `SIS` to have been done once. Also forced to the hardware defaults for the drive, then restored |
 | `zero_this_axis` | Sets this axis' position counter to zero without moving. Uses `PX`/`PY`/`PZ`, not the bare `Z` command, which would zero all three axes and clear the software limits |
 | `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT`. Each line is read independently, so one unreadable value does not take the whole report down |
@@ -136,7 +136,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 319/319
+python tests/test_proscan3_virtual.py     # expect 321/321
 ruff check src tests
 ```
 
@@ -154,7 +154,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 319 checks covering the translation sequence, all three axes,
+No hardware needed. 321 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,

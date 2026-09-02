@@ -40,14 +40,14 @@ Still simulator-only: anything on the focus axis, which is not fitted.
 | TTL port: read all eight lines, write the four outputs | done, **read and write both verified on hardware** |
 | Machine-readable error decoding, all 33 documented codes | done |
 | Compatibility-mode recovery (`COMP,0`) | done |
-| Homing and zeroing as action buttons | done, and homing now **forces the hardware defaults and restores them**, and waits for the mechanics rather than for `R` |
+| Homing and zeroing as action buttons | done, **SIS verified on an H101A** (7.54 s, deterministic), and homing now **forces the hardware defaults and restores them**, and waits for the mechanics rather than for `R` |
 | Read-only status diagnostic | done |
 | Read-only self-test (tier 1) | done, **12/12 on hardware with a stage**, 10/10 bare |
 | Joystick lockout self-test (tier 2) | done, **5/5 on hardware** with a joystick attached |
 | Motion self-test, ±500 µm (tier 3) | done, **3/3 on hardware**, 0.000 µm error both legs |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **319/319**, exit 0, across 35 sections.
+`python tests/test_proscan3_virtual.py` → **321/321**, exit 0, across 35 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -212,6 +212,40 @@ Two lessons worth carrying:
 - **A tolerance check is not a nicety.** It was the only thing standing between this and
   months of quietly wrong data.
 
+### The SIS session — homing, and the R fix vindicated
+
+`SIS` was run on the H101A for the first time on this pairing, with the stage clear. It
+**took 7.54 s**. Without the `R` fix above, `set_index()` would have returned in about
+20 ms and reported success while the stage drove into both hard limits for another seven
+and a half seconds. That is the clearest vindication of that fix available.
+
+| | First run | After moving 2 mm clear |
+|---|---|---|
+| Duration | 7.54 s | 3.07 s |
+| Position after | `4,0,0` | `4,0,0` |
+| `LMT` after | `0x05` (+X, +Y) | `0x05` |
+| `=` latch | `5` | `5` |
+
+Three things to know:
+
+1. **It indexes against the `+X` and `+Y` limits, so usable travel afterwards is
+   negative.** Absolute zero sits at the positive end of both axes, and the H101A's
+   114 × 75 mm of travel runs from 0 down to roughly −114000 / −75000 user units.
+2. **X reproducibly lands on 4 user units, not 0, while Y lands on exactly 0.** Manual 4.3
+   says SIS "sets absolute position to 0,0". Identical on both runs and stable under
+   repeated reads, so it is deterministic rather than drift or settling. `BLSH` is
+   `1,125` — backlash compensation on, 125 microsteps = 5 µm — which is the same order as
+   the offset and the obvious suspect, but 4 ≠ 5 and that has not been demonstrated.
+   Recorded as an observation, not an explanation. It does not affect the driver:
+   positions are self-consistent afterwards and moves from there were exact.
+3. `set_index()` now reports the position it reached and the limit switches it is sitting
+   on rather than only claiming success, because on this stage "indexed and zeroed" would
+   have overstated what happened to X.
+
+Motion settings were restored, `ERRORSTAT` stayed `NONE`, the port buffer was clean, and
+moves straight afterwards were exact (X 4 → −2000 µm, Y → −2000 µm). Step 9 of
+`docs/hardware-test-procedure.md` is done.
+
 ### The joystick session
 
 A joystick was attached after a power cycle. Tier 1 held at its baseline across the power
@@ -339,7 +373,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 319 checks:
+Honest limits of the 321 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`

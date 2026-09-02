@@ -923,8 +923,21 @@ class Device(EmptyDevice):
                 return
             note = self._home_with_default_motion_settings(command, axes)
             scope = "the X and Y axes" if command == "SIS" else "the Z axis"
+
+            # Report where it actually ended up. Manual 4.3 says SIS "sets absolute
+            # position to 0,0", but on the bench H101A it reproducibly leaves X at 4 user
+            # units with Y at exactly 0, so a bare "completed" would overstate it.
+            landed = ""
+            try:
+                landed = f"\n\nPosition now: {self._query('P')} (x,y,z in user units)."
+                switches = self.decode_limit_bits(self.get_active_limit_switches())
+                landed += f" Limit switches active: {switches}."
+            except Exception as exc:  # noqa: BLE001 - the index itself already succeeded
+                landed = f"\n\nThe position could not be read back: {exc}"
+
             self.message_box(
-                f"ProScan III: {command} completed, indexing and zeroing {scope}.{note}",
+                f"ProScan III: {command} completed, indexing and zeroing {scope}."
+                f"{landed}{note}",
             )
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: {command} failed: {exc}")

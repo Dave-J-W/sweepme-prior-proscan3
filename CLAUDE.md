@@ -73,7 +73,7 @@ git log --format='%an <%ae>|%cn <%ce>' | sort -u
 
 ```bash
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # the gate: must print 319/319 and exit 0
+python tests/test_proscan3_virtual.py     # the gate: must print 321/321 and exit 0
 ruff check src tests
 ```
 
