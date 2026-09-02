@@ -567,6 +567,10 @@ class Device(EmptyDevice):
         self.ttl_outputs_before_run: int | None = None
         self.restore_ttl_outputs: bool = True
         self.joystick_was_disabled: bool = False
+
+        # Set when a wait was cut short by SweepMe!s stop button, so measure() can say
+        # so instead of blaming the axis scaling for a move that was deliberately halted.
+        self.move_was_stopped: bool = False
         # Manual 4.2: reading '=' clears the latch, so accumulate every byte read.
         self.limit_latch_accumulated: int = 0
 
@@ -761,6 +765,10 @@ class Device(EmptyDevice):
         if self.sweep_mode == "None":
             return
 
+        # Cleared here as well as in measure(), so a stop that was never followed by a
+        # measure() cannot be reported against a later point.
+        self.move_was_stopped = False
+
         requested_um = self._to_float(self.value, "Sweep value")
 
         if self.sweep_mode.startswith("Relative"):
@@ -816,6 +824,22 @@ class Device(EmptyDevice):
             return
 
         deviation = abs(self.measured_position_um - self.target_position_um)
+
+        # A stopped move is short of target by definition, and blaming the scaling for it
+        # would send someone debugging a problem that does not exist. Observed on
+        # hardware: a stop 88 % through a 2 mm move produced a 231 µm deviation and the
+        # tolerance message advised checking RES/SS, backlash and software limits.
+        if self.move_was_stopped:
+            self.move_was_stopped = False
+            msg = (
+                f"The run was stopped during the move to {self.target_position_um:.3f} µm. "
+                f"The {self.axis} axis was halted with 'I' at "
+                f"{self.measured_position_um:.3f} µm, {deviation:.3f} µm short. This is not a "
+                "fault: the position is real, but it is not the requested one, so it is not "
+                "recorded as a data point."
+            )
+            raise RuntimeError(msg)
+
         if deviation > self.position_tolerance:
             msg = (
                 f"The {self.axis} axis reported {self.measured_position_um:.3f} µm after a move "
@@ -2270,6 +2294,7 @@ class Device(EmptyDevice):
                 # Manual 4.2: 'I' stops in a controlled manner and empties the queue.
                 self._write("I")
                 self._drain()
+                self.move_was_stopped = True
                 return
             if time.time() > deadline:
                 raise TimeoutError
@@ -2298,6 +2323,7 @@ class Device(EmptyDevice):
                 # Manual 4.2: 'I' stops in a controlled manner and empties the queue.
                 self._write("I")
                 self._drain()
+                self.move_was_stopped = True
                 return
 
             if time.time() > deadline:

@@ -16,8 +16,15 @@ find: **`R` is a command acknowledgement on firmware 1.03, not the end-of-move s
 manual 4.1 promises.** The driver believed the manual, so `reach()` returned ~20 ms into
 every travel. See "The motion session" below; the fix is in `wait_for_end_of_move()`.
 
-Still simulator-only: the SweepMe! stop button mid-move (the timeout path is covered), and
-anything on the focus axis, which is not fitted.
+The stop button was then tested mid-move on hardware, which found a smaller defect of the
+same shape: after a deliberate stop, `measure()` reported the shortfall as a tolerance
+failure and advised checking "the axis scaling (RES/SS), backlash settings and software
+limits" — sending someone to debug a problem that did not exist. It now says the run was
+stopped and where the axis was halted. `I` stopped the axis 88.5 % into a 2 mm move,
+reproducibly, and **the link stayed in sync**: `PX`, `$`, `LMT` and `VERSION` all answered
+afterwards with nothing left in the buffer.
+
+Still simulator-only: anything on the focus axis, which is not fitted.
 
 | Capability | State |
 |---|---|
@@ -40,7 +47,7 @@ anything on the focus axis, which is not fitted.
 | Motion self-test, ±500 µm (tier 3) | done, **3/3 on hardware**, 0.000 µm error both legs |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **281/281**, exit 0, across 33 sections.
+`python tests/test_proscan3_virtual.py` → **286/286**, exit 0, across 33 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -332,7 +339,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 281 checks:
+Honest limits of the 286 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`

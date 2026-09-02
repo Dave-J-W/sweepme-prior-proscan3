@@ -888,6 +888,34 @@ def test_end_of_move_is_not_the_acknowledgement(driver) -> None:
     )
     check(instrument.out == [], "with no unread response there either")
 
+    # A user stop mid-move must not be blamed on the axis scaling.
+    #
+    # Observed on hardware: a stop 88 % through a 2 mm move left the axis 231 µm short,
+    # and measure() advised checking RES/SS, backlash and software limits -- sending
+    # someone to debug a problem that did not exist.
+    instrument = ProScanIIISimulator(microsteps_per_second=25 * 500)     # 0.5 mm/s
+    device = bring_up(driver, instrument)
+    began = [None]
+    device.is_run_stopped = lambda: began[0] is not None and time.time() - began[0] > 0.2
+    device.set_value(2000.0)
+    began[0] = time.time()
+    device.apply()
+    device.reach()
+    check("I" in instrument.log, "a stop mid-move sends 'I'")
+    check(not instrument.active_move, "and the axis actually stops")
+    stopped_at = instrument.position_in_user_units("X")
+    check(0 < stopped_at < 2000, f"part way through the move, at {stopped_at} user units")
+    expect_error(
+        device.measure,
+        "measure() says the run was stopped, and does not blame the scaling",
+        contains="The run was stopped during the move",
+    )
+
+    # The flag must not leak into a later point that completed normally.
+    device.is_run_stopped = lambda: False
+    result = run_point(device, 1000.0)
+    check(result[0] == 1000.0, "a later successful point is unaffected by the earlier stop")
+
     # A stalled axis must still time out rather than hang for ever on '$'.
     instrument = ProScanIIISimulator(stall_forever=True)
     device = bring_up(driver, instrument, **{"Move timeout in s": "0.5"})
