@@ -114,7 +114,7 @@ These are not omissions. Each one would produce a plausible-looking wrong result
 7. **`COMP` is forced.** The driver insists on standard mode in `connect()`, because
    compatibility mode changes response formats.
 
-## The one real gap: XD and YD
+## The remaining gap: XD and YD
 
 The user-facing "stage motion coordinate system" is two separate things on this controller:
 
@@ -123,14 +123,27 @@ The user-facing "stage motion coordinate system" is two separate things on this 
   set which mechanical direction a software move goes in.
 
 `ZD` has a documented query form and is captured. **`XD` and `YD` do not.** Manual 4.3 lists
-them only as `XD d → 0` and `YD d → 0`; there is no `XD None` row, and no other command
-reports them. `SS`'s own entry confirms they matter — "This value is linked with RES,S and
-XD/YD values" — but gives no way to read them.
+them only as `XD d → 0` and `YD d → 0`; there is no `XD None` row, unlike `JXD`, which has
+both a setter row and an explicit `JXD None d → Reads d.` row. `SS`'s own entry confirms
+they matter — "This value is linked with RES,S and XD/YD values" — but documents no way to
+read them.
 
-So the capture writes `move_x_direction` and `move_y_direction` as empty, with the reason in
-the file. Fill in `1` or `-1` by hand if you want the driver to restore them; leave them
-empty and the driver leaves the controller alone. There is no way for the driver to discover
-these values, and it does not guess.
+**Firmware 1.03 answers them anyway.** Bare `XD` and bare `YD` both return `-1` on the
+bench controller, through the driver's own query path, alongside `JXD` `-1`, `JYD` `-1`,
+`JZD` `1` and `ZD` `-1` — a plausible direction in the same ±1 form, not a rejection.
+See `docs/command-map.md`, "Traps this run exposed".
+
+So this is now a **decision, not an impossibility**, and the decision has deliberately been
+left alone: the authority order in `CLAUDE.md` puts the manual above observed behaviour, and
+an undocumented query form could mean something else on another firmware. Reading it is only
+a read, so the risk is misinterpretation rather than damage — but two silently wrong
+direction values would invert a restored coordinate system, which is the kind of plausible
+wrongness this driver exists to avoid.
+
+Until that is decided, the capture writes `move_x_direction` and `move_y_direction` as
+empty, with the reason in the file. Fill in `1` or `-1` by hand if you want the driver to
+restore them; leave them empty and the driver leaves the controller alone. The driver does
+not guess.
 
 ## Hand-editing
 

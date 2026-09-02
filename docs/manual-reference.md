@@ -61,9 +61,22 @@ print(len(reader.pages), 'pages')
 grep -n '4.3 Stage Commands' manual.txt
 ```
 
-`manual.txt` is also gitignored. Approximate line offsets in that extraction, for the
-V 1.16 edition: 4.1 at ~1452, 4.1.1 at ~1547, 4.2 at ~1567, 4.3 at ~1879, 4.4 at ~2418,
-4.13 at ~3295, Appendix B at ~4400, Appendix E at ~4560.
+`manual.txt` is also gitignored. Line offsets in that extraction, measured with pypdf
+6.16.2 on the V 1.16 edition (109 pages, 4942 lines) — the section headings are greppable
+as `^4\.[0-9]`, which is quicker than trusting this table:
+
+| Section | Line | Section | Line |
+|---|---|---|---|
+| 4.1 | 1448 | 4.11 OEM | 3147 |
+| 4.1.1 axis IDs | 1543 | 4.12 nosepiece | 3268 |
+| 4.2 general | 1563 | 4.13 errors | 3290 |
+| 4.3 stage | 1875 | 4.14 CS152 | 3353 |
+| 4.4 Z axis | 2413 | 4.16 trigger board | 3490 |
+| 4.5 filter wheels | 2624 | 4.17 encoders | 3619 |
+| 4.6 shutters | 2732 | Appendix B | ~4400 |
+| 4.7 Lumen Pro | 2793 | Appendix E | ~4560 |
+| 4.8 LEDs | 2851 | Appendix F fourth axis | 4571 |
+| 4.9 patterns | 2871 | 4.10 stage mapping | 3050 |
 
 Note that the PDF's command tables extract with ragged whitespace and occasional broken
 words (`ERRORSTA T`, `COMMAND_NOT_FOUN D`), so search for a distinctive fragment rather
@@ -71,7 +84,7 @@ than a whole phrase.
 
 ## Reading the tables correctly
 
-Two traps in how the manual presents commands, both of which have already caused bugs:
+Three traps in how the manual presents commands, all of which have already caused bugs:
 
 1. **The same command name appears in several rows** — one per argument form. `SS` with
    no argument queries; `SS s` sets. `BLSH` has three rows. Check every row before
@@ -81,3 +94,29 @@ Two traps in how the manual presents commands, both of which have already caused
    parses `RES` leniently and falls back to `SS`/`SSZ`. Everywhere else the column is
    populated: setters answer `0`, movement commands answer `R` at the *end of the move*,
    queries answer a value, and rejections answer `E,n`.
+3. **A missing row does not mean a missing command** — the reverse of trap 1. `XD` and
+   `YD` have a setter row only, with no `XD None` query row of the kind `JXD` has, and
+   firmware 1.03 answers the bare form anyway. The manual is a lower bound on what the
+   firmware implements, not an upper one. It cuts both ways: `UNTLIMIT,?` and its whole
+   family are fully documented and firmware 1.03 rejects every one of them.
+
+## One comma from a destructive write
+
+Outside 4.1–4.4, several families use the *same command word* for a query and for a move,
+distinguished only by the argument count. If you write an exploratory probe against a real
+controller, validate each string structurally rather than trusting a hand-typed list — the
+survey script behind `docs/command-map.md`'s hardware section refuses to send anything
+failing these checks.
+
+| Query form | One comma away | Manual |
+|---|---|---|
+| `8,s` reports shutter status | `8,s,c` **opens or closes** the shutter | 4.6 |
+| `7,w,F` reports filter position | `7,w,<n>` **moves** the wheel; `7,w,H` **homes** it | 4.5 |
+| `ENCODER,<axis letter>` per-axis query | `ENCODER,<digit>` **enables or disables every encoder** | 4.17 |
+| `SERVO,<axis letter>` per-axis query | `SERVO,<digit>` writes the global servo state | 4.17 |
+| `OEM,n` / `OEM,n,<property>` queries | `OEM,n,G,x` **drives** the axis; `OEM,n,P,x` sets its position | 4.11 |
+| `NP`, `NP,?`, `NP,$` queries | `NP,<n>` **moves** the nosepiece; `NP,H` **homes** it | 4.12 |
+| `LIGHT` reports output | `LIGHT,n` sets it; `LIGHT,POWER,n` switches the Lumen unit | 4.7 |
+
+`ZA` (Appendix F) zeroes the fourth axis, so it belongs with the bare `Z` prohibition in
+`CLAUDE.md`, not with the harmless queries.

@@ -104,21 +104,92 @@ genuinely blank.
 
 ## Confirmed against hardware
 
-Read from a ProScan H31XYZ, **firmware `VERSION` 103** (1.03, compiled Nov 2017,
-HARDWARE REV F, 3-axis stepper), on 2026-09-02. Everything above this section was a reading
-of the manual; these are observations.
+Read from a ProScan H31XYZ, `SERIAL` **1216304**, **firmware `VERSION` 103** (1.03,
+compiled Nov 2017, HARDWARE REV F, 3-axis stepper, `DRIVE CHIPS 000111`), on 2026-09-02.
+Everything above this section was a reading of the manual; these are observations.
+
+131 query commands were sent, covering manual 4.2–4.8, 4.11–4.13, 4.16–4.17 and
+Appendix F. **No setter and no movement command was sent**, so nothing below required a
+stage, and none of it changed the controller's state. The controller had nothing plugged
+into it: `?` reports `STAGE = NONE`, `FOCUS = NONE`, `FOURTH = NONE`, `FILTER_1/2 = NONE`,
+`SHUTTERS = 000`, `LED = 0000`, `TRIGGER = NONE`, `INTERPOLATOR = NONE`,
+`AUTOFOCUS = NONE`, `VIDEO = NONE`, `JOYSTICK NOT FITTED`.
+
+### Values
 
 | Command | Answered | Note |
 |---|---|---|
 | `VERSION` | `103` | three figures, as documented |
-| `COMP` | `0` | |
-| `ERROR` | `0` | |
-| `$,X` | `0` | |
+| `DATE` | 2 lines | **the multi-line quirk is real** — controller name, then version and compile date |
+| `SERIAL` | `1216304` | |
+| `COMP` / `ERROR` / `$` | `0` | |
 | `LMT` | `0F` | **two hex digits confirmed** — 0x0F is the four X/Y limits |
-| `SMS` | `100` | |
-| `SAS` | `100` | |
-| `BLSH` | `1,125` | two fields, `on/off,distance` |
-| `BOGUS` | `E,5` | invalid commands do decode as `COMMAND_NOT_FOUND` |
+| `=` | `0` | read twice, `0` both times; nothing had latched |
+| `P` | `0,0,0` | |
+| `SMS` / `SAS` / `SCS` / `SMZ` / `SAZ` / `SCZ` | `100` | |
+| `X` | `1000,1000` | X/Y step size, two fields |
+| `C` | `1000` | Z step size |
+| `BLSH` / `BLSJ` | `1,125` / `0,125` | `on/off,distance` |
+| `BLZH` / `BLZJ` | `1,2500` / `0,2500` | |
+| `JXD` / `JYD` / `JZD` | `-1` / `-1` / `1` | directions are ±1 |
+| `ZD` / `XD` / `YD` | `-1` | see the `XD`/`YD` note below |
+| `O` / `OF` | `100` | |
+| `SKEW` | `0.00` | **the only decimal-formatted response seen** — everything else is an integer |
+| `CURRENT,1/2/3` | `1000,500,500` | identical on all three |
+| `SS` / `RES,S` / `SSZ` / `RES,Z` / `UPR,Z` | `0` | no stage or focus fitted |
+| `ERRORSTAT` | `NONE`, `END` | |
+| `FILTER,1/2/3`, `SHUTTER,1/2/3`, `FOURTH` | `<name> = NONE`, `END` | the info-block form answers even when nothing is fitted |
+| `FPW,1`, `SAF,1`, `SCF,1`, `SMF,1` | `0`, `100`, `100`, `100` | likewise answer with no wheel fitted |
+| `OEM,1` … `OEM,6` | `0` | not fitted, cleanly reported |
+| `ENCODER`, `ENCODER,S/X/Y/Z/A` | `0` | no encoders |
+| `ENCW,X` / `ENCW,Z` / `SERVO` / `SERVO,X` / `SERVO,Z` | `0` | |
+| `ENCW` (bare) | `0 0 0 0` | **space-separated, not comma-separated** — the only such response |
+| `P,s` / `P,e` | `0,0,0` | stepper vs encoder position; a clean read-only diagnostic |
+| `TRIGGERRES,X/Y/Z` | `0` | **answers `0` rather than rejecting**, with `TRIGGER = NONE` |
+| `LED,1,STATE` / `LED,1,POWER` | `7` / `100,0` | neither matches the manual's documented `[0\|1]` and `[0-100]` |
+
+### Rejections, decoded against real responses
+
+Six documented codes and one undocumented one were provoked. Before this only `E,4` and
+`E,5` had ever been seen from hardware.
+
+| Code | Name | Provoked by |
+|---|---|---|
+| `E,4` | `STRING_PARSE` | `MOTOR` bare — it needs an argument |
+| `E,5` | `COMMAND_NOT_FOUND` | the software-limit family; `LED,n,FITTED/LAMBDA/FAN`; any invalid command |
+| `E,10` | `ARG1_OUT_OF_RANGE` | `LED,5..8,FITTED` — this controller has four LED channels, matching `LED = 0000` |
+| `E,17` | `NO_FILTER_WHEEL` | `7,1,F` / `7,2,F` / `7,3,F` |
+| `E,20` | `SHUTTER_NOT_FITTED` | `8,1` / `8,2` / `8,3` |
+| `E,40` | `NO_FOURTH_AXIS` | `PA` |
+| `E,128` | **not in the manual** | every `OEM,n,<property>` form, and every `NP` form |
+
+`E,128` appears nowhere in the V 1.16 manual's error table, which stops at 53; the only
+`128` in the document is the H127/H128 controller model names. The driver decodes it as
+`UNKNOWN_ERROR (E,128)` and raises, which is the right behaviour and is now confirmed on
+hardware rather than by inspection.
+
+### Traps this run exposed
+
+1. **`XD` and `YD` do have a query form on this firmware.** Both answer `-1`, a plausible
+   direction alongside `JXD`/`JYD`/`JZD`/`ZD`, and they answer through the driver's own
+   `_query` path, so it is a value and not a mis-read rejection. The manual gives `XD`
+   and `YD` a **setter row only** (`XD d 0`), unlike `JXD` which has both a setter row and
+   a `JXD None d Reads d.` row — so the manual is not wrong about what it documents, it
+   simply omits a form the firmware implements. The capture still leaves both keys empty;
+   see `docs/development-status.md` for why that is now a decision rather than a gap.
+2. **`$` cannot tell you whether an axis exists.** `$,1` through `$,9` — every axis number
+   in 4.1.1, including the filter wheels and the fourth axis — all answer `0`, "not
+   moving", on a controller where none of them is fitted.
+3. **`TRIGGERRES` cannot tell you whether the trigger board exists.** It answers `0` with
+   no board fitted rather than `E,52`, despite 4.16 saying those commands "are only
+   available if the trigger board is fitted".
+4. **`FILTER,w` / `SHUTTER,s` cannot tell you what is fitted either** — they answer an
+   info block reading `= NONE`. Use `?`, or the `7,w,F` / `8,s` forms, which do reject.
+   Note `FILTER,3` answers even though `?` lists only `FILTER_1` and `FILTER_2`.
+5. **`LED,1,FLUOR` returned nothing at all.** One command in 131, and it contradicts
+   manual 4.1's "the ProScan III answers EVERY command". A silent command leaves the link
+   with an unread response pending; the driver's `_query` raises on an empty read, which
+   is the safe outcome, but anything that swallows that would desynchronise.
 
 **Firmware 1.03 does not implement the software-limit query family at all.** All of
 `UNTLIMIT,?`, `CHKLIMITR`, `CHKLIMITA`, `ACTLIMITR,?` and `ACTLIMITA,?` — rows 5 to 9 of
