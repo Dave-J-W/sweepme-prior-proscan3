@@ -15,7 +15,7 @@ so a setup made by hand in the Prior GUI survives a power cycle.
 ```
 src/Switch-Prior_ProScanIII/main.py    the driver
 tests/proscan3_simulator.py            a simulator of the ProScan III serial protocol
-tests/test_proscan3_virtual.py         hardware-free test bench — 229 checks
+tests/test_proscan3_virtual.py         hardware-free test bench — 268 checks
 CLAUDE.md                              conventions and hard rules for working on this
 docs/command-map.md                    every command, traced to the manual, plus the quirks
 docs/configuration-capture.md          what the configuration capture saves, and what it will not
@@ -39,7 +39,9 @@ point `pysweepme.get_driver` at) and add a **Switch** module to the sequencer.
 | **Speed**, **Acceleration** | Leave empty to keep the controller's settings. Documented range 1–1000 for X/Y (`SMS`/`SAS`), 1–100 for Z (`SMZ`/`SAZ`). The manual allows higher X/Y values without guaranteeing the result, so those are passed on with a warning; the Z range is enforced |
 | **Move timeout in s** | How long to wait for the end-of-move `R` before stopping the axis and raising |
 | **Position tolerance in µm** | How far the readback may differ from the target before the point is treated as a failure |
-| **Disable joystick during run** | Sends `H,1` in `configure()` and `J` in `unconfigure()`, so a nudged joystick cannot corrupt a scan |
+| **Disable Joystick during SweepMe Run** | Sends `H,1` in `initialize()` and `J` in `disconnect()`, so a nudged joystick cannot corrupt a scan. Deliberately *not* `configure()`/`unconfigure()`, which SweepMe! calls once per branch — a lockout taken there is released and retaken between branches, leaving the joystick live in the gaps. The pre-rename field name `Disable joystick during run` is still accepted, so older saved sequences keep working |
+| **TTL outputs at start of run** | A hex digit `0`–`F` driven onto the four `TTL_OUT` lines in `configure()`. **Empty is the default and leaves them untouched**, because on a real installation these lines may gate a camera, a shutter or a laser |
+| **Restore TTL outputs at end of run** | Put the `TTL_OUT` lines back to whatever they were before the run. The pre-run state is read before writing, so a line already high is restored high rather than zeroed |
 | **Configuration** | A saved controller configuration to apply at the start of each run, or `None`. The list is the contents of the configuration folder, read when the driver loads. See [configuration capture](docs/configuration-capture.md) |
 | **Save configuration as** | The file name the **Save configuration** button writes to. Leave empty to have one generated from the controller serial number and the current time |
 
@@ -54,6 +56,7 @@ Output variable: `Position` in µm — the *measured* position, not the requeste
 | `restore_index_of_stage` | `RIS` — re-synchronise the whole X/Y stage with the controller after it was moved by hand while powered off. **Moves the stage.** Requires `SIS` to have been done once |
 | `zero_this_axis` | Sets this axis' position counter to zero without moving. Uses `PX`/`PY`/`PZ`, not the bare `Z` command, which would zero all three axes and clear the software limits |
 | `report_status` | Read-only diagnostic: version, position, scale, limit switches, `ERRORSTAT`. Each line is read independently, so one unreadable value does not take the whole report down |
+| `report_ttl` | Read-only diagnostic for the TTL port: the four `TTL_OUT` bits, the four `TTL_IN` bits, and the `LTTL` input latch. Note that reading `LTTL` **clears** it. This is the authoritative reading of TTL state — the joystick's own screen does not track host writes |
 | `run_self_test` | **Tier 1, read-only.** Moves nothing and needs nothing fitted. Checks firmware, that the two-line `DATE` was drained, standard command mode, the serial number, what is fitted, both limit-switch number bases, the scaling, and that a rejection still decodes to a documented name. Anything unfitted or unreadable is reported as a note, not a failure |
 | `run_self_test_joystick` | **Tier 2, writes but moves nothing.** Round-trips the joystick lockout: sends `H,1` then `J`, and reads the `?` block after each to confirm the controller acted, rather than trusting the acknowledgement. Restores the joystick to the state it was found in even if a check fails. Refuses if no joystick is fitted, or while a run holds the lockout |
 | `run_self_test_motion` | **Tier 3, moves the selected axis 500 µm and back.** Needs 0.5 mm of clear travel in the positive direction. Refuses before sending any movement command if the axis is not fitted, the scale is unknown, the axis is already moving, the controller is in compatibility mode, or a limit switch is already active. If it hits a limit mid-test it stops there and does not move again |
@@ -131,7 +134,7 @@ cd sweepme-prior-proscan3
 git config user.name  "Dave-J-W"
 git config user.email "248028152+Dave-J-W@users.noreply.github.com"
 pip install -r requirements-dev.txt
-python tests/test_proscan3_virtual.py     # expect 229/229
+python tests/test_proscan3_virtual.py     # expect 268/268
 ruff check src tests
 ```
 
@@ -149,7 +152,7 @@ pip install pysweepme
 python tests/test_proscan3_virtual.py
 ```
 
-No hardware needed. 229 checks covering the translation sequence, all three axes,
+No hardware needed. 268 checks covering the translation sequence, all three axes,
 user-unit conversion including the coarse-resolution and focus-axis cases, relative moves,
 compatibility-mode recovery, limit-switch handling (including `=` decimal vs `LMT` hex),
 arrival verification, the stop button, a doubled stop acknowledgement, the move timeout,

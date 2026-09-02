@@ -49,6 +49,12 @@ rather than raising.
 | `set_acceleration` | `SAS,<a>` (X/Y) / `SAZ,<a>` (Z) | `0` | 4.3, 4.4 |
 | `set_joystick_enabled(False)` | `H,1` | `0` | 4.3 |
 | `set_joystick_enabled(True)` | `J` | `0` | 4.3 |
+| `get_joystick_status_line` | `?` | the `JOYSTICK …` line of the block | 4.2 |
+| `get_ttl_port`, `get_ttl_output_bits`, `get_ttl_input_bits` | `TTL` | `DCBA`, **lowercase**, leading zeros omitted | 4.19 |
+| `get_ttl_bit` | `TTL,<n>,?` | `0` or `1`; n=0–3 out, n=8–11 in | 4.19 |
+| `set_ttl_output_bit` | `TTL,<n>,<m>` | `0` | 4.19 |
+| `set_ttl_output_bits` | `TTL,<hex>` | `0` | 4.19 |
+| `get_latched_ttl_transitions` | `LTTL` | `h,l`; **clears on read** | 4.17 |
 | `stop_motion`, timeout and stop paths | `I` | `R` | 4.2 |
 | `set_index` | `SIS` (X/Y) / `SIZ` (Z) | `R` | 4.3, 4.4 |
 | `restore_index_of_stage` | `RIS` | `R` | 4.3 |

@@ -22,7 +22,8 @@ settled" below for what that does and does not license.
 | Limit-switch detection after each move | done |
 | Arrival verification against a tolerance | done |
 | Speed and acceleration, optional | done |
-| Joystick lockout during a run | done |
+| Joystick lockout for the whole run (`initialize`→`disconnect`) | done, **verified on hardware** including surviving a configure/unconfigure cycle |
+| TTL port: read all eight lines, write the four outputs | done, **read and write both verified on hardware** |
 | Machine-readable error decoding, all 33 documented codes | done |
 | Compatibility-mode recovery (`COMP,0`) | done |
 | Homing and zeroing as action buttons | done |
@@ -30,10 +31,9 @@ settled" below for what that does and does not license.
 | Read-only self-test (tier 1) | done, **10/10 on hardware**, X, Y and Z |
 | Joystick lockout self-test (tier 2) | done, **5/5 on hardware** with a joystick attached |
 | Motion self-test, ±500 µm (tier 3) | written; **its refusals are verified on hardware, the move itself is not** |
-| Joystick lockout during a run, verified through `?` | done, and confirmed on hardware |
 | Configuration capture to a commented `.ini`, and restore | done |
 
-`python tests/test_proscan3_virtual.py` → **229/229**, exit 0, across 31 sections.
+`python tests/test_proscan3_virtual.py` → **268/268**, exit 0, across 32 sections.
 `ruff check src tests` clean. Both run on **Python 3.9.23 with pysweepme 1.5.6.17** —
 3.9 is the floor `pyproject.toml` pins and the version SweepMe! 1.5.6 ships, and 3.10+
 syntax in the bench has broken it there once already.
@@ -48,7 +48,11 @@ tier 2 confirms the joystick lockout through `?` instead of trusting the acknowl
 fails against firmware that ignores `H,1`, restores the joystick, and refuses while a run
 holds the lockout; and that tier 3 refuses on an unfitted axis or an already-active limit
 switch, moves exactly ±500 µm, returns the axis to where it started, and stops without a
-second move if it hits a limit.
+second move if it hits a limit. Section 32 covers the TTL port: that an empty GUI field
+writes nothing at all, that a requested pattern is restored to the *pre-run* state rather
+than zeroed, that every write form sends the level explicitly so a bare `TTL,n` can never
+be emitted, that `TTL_IN` is refused as a write target, that a bad hex entry is rejected
+before anything is sent, and that `LTTL` consumes its latch.
 
 ## What the bench controller settled
 
@@ -183,7 +187,8 @@ up is a short job.
 | Constant-velocity moves (`VS`, `VZ`) | 4.3, 4.4 | For scanning at fixed speed rather than point-to-point |
 | *Setting* software limits (`XLIMITA`/`XLIMITR`/`SWLL`/`SWLH`/`ACTLIMIT*`) | 4.3 | Worth adding as a safety envelope. Currently read as reference data only. Note they interfere with `SIS`/`RIS` — **and that firmware 1.03 rejects the whole query family with `E,5`, so on that firmware a limits feature could not read back what it set** |
 | Stage mapping and patterns | 4.9, 4.10 | Controller-side scan patterns |
-| TTL triggering, trigger board, encoders | 4.16–4.21 | The obvious pairing with a photon counter — a TTL pulse on move completion. **The hardware is already there**: the four-in/four-out TTL port on the K2 header is built in and answers `TTL`/`LTTL` on firmware 1.03, despite `?` reporting `TRIGGER = NONE` (that names only the 4.16 add-on board). Read forms are `TTL` bare and `TTL,n,?`; note `TTL,n` without a level is a *write* |
+| A TTL pulse *on move completion*, and `TTLTP`/`TTLACT` trigger lists | 4.16, 4.20 | The obvious pairing with a photon counter. Reading and writing the TTL lines is now **implemented** (see above); what is still out of scope is tying an edge to a move, and the controller-side trigger lists of 4.20 which run action lists off a TTL input |
+| Trigger board and encoders | 4.16–4.17 | Neither is fitted on the bench controller, so `TRIGGERRES` and the `ENCODER`/`SERVO`/`ENCW` families are read-only reference data here |
 | `OEM` per-axis commands, including `OEM,n,HOME` | 4.11 | Direct axis control that bypasses the stage abstraction |
 | Fourth axis | Appendix F | `SMA`, `SAA`, `PA`, `GA`, `CW`/`ACW` |
 | Filter wheels, shutters, LEDs, nosepiece, Lumen | 4.5–4.8, 4.12 | Separate `Switch` drivers, sharing the port via `self.device_communication` |
@@ -232,7 +237,7 @@ Two more, found later:
 
 ## Known gaps in the verification
 
-Honest limits of the 229 checks:
+Honest limits of the 268 checks:
 
 - **Nothing that moves has been run on hardware.** The controller on the bench has no
   stage, focus or joystick fitted, so every motion path — `G*`, end-of-move `R`

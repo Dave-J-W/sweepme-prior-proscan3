@@ -506,6 +506,7 @@ class Device(EmptyDevice):
         "restore_index_of_stage",
         "zero_this_axis",
         "report_status",
+        "report_ttl",
         "run_self_test",
         "run_self_test_joystick",
         "run_self_test_motion",
@@ -559,6 +560,12 @@ class Device(EmptyDevice):
         self.user_unit_in_microns: float = 1.0
         self.target_position_um: float = 0.0
         self.measured_position_um: float = float("nan")
+
+        # Set in configure() only when the GUI asked for a TTL pattern, so unconfigure()
+        # restores what was actually there rather than assuming the lines started low.
+        self.ttl_outputs_at_start: int | None = None
+        self.ttl_outputs_before_run: int | None = None
+        self.restore_ttl_outputs: bool = True
         self.joystick_was_disabled: bool = False
         # Manual 4.2: reading '=' clears the latch, so accumulate every byte read.
         self.limit_latch_accumulated: int = 0
@@ -577,8 +584,13 @@ class Device(EmptyDevice):
             "  ": None,
             "Move timeout in s": "60",
             "Position tolerance in µm": "2.0",
-            "Disable joystick during run": True,
+            "Disable Joystick during SweepMe Run": True,
             "   ": None,
+            # Manual 4.19. Empty leaves the four TTL_OUT lines exactly as found, which is
+            # the default because these lines may gate a camera, a shutter or a laser.
+            "TTL outputs at start of run (hex 0-F, empty = unchanged)": "",
+            "Restore TTL outputs at end of run": True,
+            "    ": None,
             # Built by scanning the configuration folder, so SweepMe! only lists names
             # that exist. A file saved during this session appears after a driver reload.
             "Configuration": ["None", *self.list_configurations()],
@@ -606,7 +618,23 @@ class Device(EmptyDevice):
             msg = "Position tolerance in µm must not be negative."
             raise ValueError(msg)
 
-        self.disable_joystick = bool(parameter["Disable joystick during run"])
+        # The field was called "Disable joystick during run" before the lockout moved from
+        # configure()/unconfigure() to initialize()/disconnect(); accept either key so a
+        # saved sequence from an older version still loads.
+        self.disable_joystick = bool(
+            parameter.get(
+                "Disable Joystick during SweepMe Run",
+                parameter.get("Disable joystick during run", True),
+            ),
+        )
+
+        # Manual 4.19. Empty means "leave the TTL outputs alone", which has to stay the
+        # default: on a real installation these lines may gate a camera or a shutter.
+        ttl_setting = str(
+            parameter.get("TTL outputs at start of run (hex 0-F, empty = unchanged)", ""),
+        ).strip()
+        self.ttl_outputs_at_start = self._parse_ttl_nibble(ttl_setting) if ttl_setting else None
+        self.restore_ttl_outputs = bool(parameter.get("Restore TTL outputs at end of run", True))
 
         # Both configuration fields are optional, so a setting file written by an older
         # version of this driver still loads.
@@ -657,8 +685,36 @@ class Device(EmptyDevice):
                 msg = "The ProScan III did not leave compatibility mode (COMP,0 failed)."
                 raise RuntimeError(msg)
 
+    def initialize(self) -> None:
+        """Take the joystick lockout for the whole run (manual 4.3, 'H').
+
+        Deliberately here and not in configure(): SweepMe! calls configure() and
+        unconfigure() once per branch, so a lockout taken there is released and retaken
+        between branches, leaving the joystick live in the gaps. initialize() and
+        disconnect() bracket the entire run.
+
+        The lockout is not verified here. Confirming it costs a '?' block read, and
+        initialize() runs before the scale is known, so a controller that ignored H,1
+        would be reported at the point the run is least able to act on it. Press
+        run_self_test_joystick() to check the lockout against '?' instead.
+        """
+        if self.disable_joystick:
+            self.set_joystick_enabled(enabled=False)
+            self.joystick_was_disabled = True
+
+    def disconnect(self) -> None:
+        """Release the joystick lockout taken in initialize().
+
+        Guarded by the flag rather than by the GUI field, so this cannot re-enable a
+        joystick the driver never disabled -- another SweepMe! module may share the
+        controller (see CLAUDE.md) and may be holding its own lockout.
+        """
+        if self.joystick_was_disabled:
+            self.set_joystick_enabled(enabled=True)
+            self.joystick_was_disabled = False
+
     def configure(self) -> None:
-        """One-time setup: saved configuration, scale, speed, joystick, limit latch.
+        """One-time setup: saved configuration, scale, speed, TTL outputs, limit latch.
 
         The saved configuration goes first, because it can change the user-unit scaling
         (SS/SSZ/UPR), which everything after it depends on. The explicit Speed and
@@ -674,19 +730,31 @@ class Device(EmptyDevice):
         if self.acceleration_setting:
             self.set_acceleration(int(self._to_float(self.acceleration_setting, "Acceleration")))
 
-        if self.disable_joystick:
-            self.set_joystick_enabled(enabled=False)
-            self.joystick_was_disabled = True
+        # The joystick lockout is taken in initialize(), not here, so that it spans the
+        # whole run rather than being released between branches.
+
+        if self.ttl_outputs_at_start is not None:
+            # Read first, so unconfigure() can put back exactly what was there rather
+            # than assuming the lines started low.
+            self.ttl_outputs_before_run = self.get_ttl_output_bits()
+            self.set_ttl_output_bits(self.ttl_outputs_at_start)
 
         # Clear the '=' latch so a limit hit from before the run is not attributed
         # to a move made during it.
         self.get_limit_switch_latch()
 
     def unconfigure(self) -> None:
-        """Leave the controller as it was found; never move the stage here."""
-        if self.joystick_was_disabled:
-            self.set_joystick_enabled(enabled=True)
-            self.joystick_was_disabled = False
+        """Leave the controller as it was found; never move the stage here.
+
+        The joystick lockout is released in disconnect(), not here.
+        """
+        if (
+            self.restore_ttl_outputs
+            and self.ttl_outputs_at_start is not None
+            and self.ttl_outputs_before_run is not None
+        ):
+            self.set_ttl_output_bits(self.ttl_outputs_before_run)
+            self.ttl_outputs_before_run = None
 
     def apply(self) -> None:
         """Start the move to the value SweepMe! placed in self.value."""
@@ -893,6 +961,41 @@ class Device(EmptyDevice):
         except Exception as exc:  # noqa: BLE001 - an action must not raise
             self.message_box(f"ProScan III: could not read the status: {exc}")
 
+    def report_ttl(self) -> None:
+        """Read-only diagnostic for the TTL port (manual 4.17, 4.19).
+
+        Sends only `TTL`, `TTL,n,?` and `LTTL`. Never `TTL,n` without a level, which would
+        write rather than read.
+
+        Note that `LTTL` consumes the transitions it reports, so pressing this button
+        clears the input latch -- the same caveat as the '=' limit latch.
+        """
+        lines = []
+        try:
+            outputs = self.get_ttl_output_bits()
+            inputs = self.get_ttl_input_bits()
+            lines.append(f"TTL_OUT 3..0: {self.decode_ttl_bits(outputs)}  (0x{outputs:X})")
+            lines.append(f"TTL_IN  3..0: {self.decode_ttl_bits(inputs)}  (0x{inputs:X})")
+        except Exception as exc:  # noqa: BLE001 - a diagnostic reports, it does not abort
+            lines.append(f"the TTL port could not be read: {exc}")
+
+        try:
+            went_high, went_low = self.get_latched_ttl_transitions()
+            lines.append(
+                f"LTTL since last read: went high 0x{went_high:X}, went low 0x{went_low:X} "
+                "(reading this cleared the latch)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"LTTL could not be read: {exc}")
+
+        lines.append("")
+        lines.append(
+            "A joystick button routed to a TTL line shows up here. The joystick's own "
+            "screen does NOT track host writes, so this is the authoritative reading -- "
+            "see docs/command-map.md.",
+        )
+        self.message_box("ProScan III TTL port:\n" + "\n".join(lines))
+
     # ----------------------------------------------------------- self-tests
     #
     # Two tiers, one action each, so pressing the read-only one can never move an axis.
@@ -1011,11 +1114,23 @@ class Device(EmptyDevice):
             elif "NOT ACTIVE" in joystick.upper():
                 checks.append((
                     None,
-                    f"{joystick} -- the lockout is on. unconfigure() clears it, so if no run "
-                    "is in progress something left it set.",
+                    f"{joystick} -- the lockout is on. disconnect() releases it, so if no run "
+                    "is in progress something left it set; run_self_test_joystick() will "
+                    "round-trip it and hand the joystick back.",
                 ))
             else:
                 checks.append((True, joystick))
+
+            # The TTL port is read, never written. It answers on firmware 1.03 even with
+            # '?' reporting TRIGGER = NONE, so a rejection here is worth seeing.
+            outputs, error = self._self_test_attempt(self.get_ttl_output_bits)
+            if error:
+                checks.append((None, f"the TTL port could not be read: {error}"))
+            else:
+                checks.append((
+                    True,
+                    f"TTL_OUT 3..0 = {self.decode_ttl_bits(outputs)} (0x{outputs:X})",
+                ))
 
             scale, error = self._self_test_attempt(self.determine_user_unit_in_microns)
             checks.append(
@@ -1812,6 +1927,111 @@ class Device(EmptyDevice):
         and there is no query form for the joystick state at all.
         """
         self._command("J" if enabled else "H,1")
+
+    # ------------------------------------------------------------- TTL port
+    #
+    # Manual 4.19. The controller has a built-in four-in/four-out TTL port on the 10-way
+    # K2 header. It is present even when '?' reports TRIGGER = NONE, which names only the
+    # 4.16 add-on trigger board.
+    #
+    # The response is 'DCBA' with leading zeros omitted: A is the four TTL_OUT bits, C is
+    # the four TTL_IN bits, B and D are ignored on this hardware. Observed hex case is
+    # lowercase from TTL and uppercase from LMT, so every parse here is case-insensitive.
+
+    @staticmethod
+    def _parse_ttl_nibble(text: str) -> int:
+        """Parse a GUI-entered hex nibble for the four TTL_OUT bits."""
+        try:
+            value = int(str(text).strip(), 16)
+        except (TypeError, ValueError) as exc:
+            msg = (
+                f"The TTL outputs field must be a hexadecimal digit 0-F, got {text!r}."
+            )
+            raise ValueError(msg) from exc
+        if not 0 <= value <= 0x0F:
+            msg = f"The TTL outputs field must be in the range 0-F, got {text!r}."
+            raise ValueError(msg)
+        return value
+
+    def get_ttl_port(self) -> int:
+        """Return the whole TTL port response as an integer (manual 4.19, bare 'TTL')."""
+        response = self._query("TTL")
+        try:
+            return int(response, 16)
+        except ValueError as exc:
+            msg = f"Invalid TTL response from the ProScan III: {response!r}."
+            raise RuntimeError(msg) from exc
+
+    def get_ttl_output_bits(self) -> int:
+        """Return the four TTL_OUT bits as a 0-15 integer (manual 4.19)."""
+        return self.get_ttl_port() & 0x0F
+
+    def get_ttl_input_bits(self) -> int:
+        """Return the four TTL_IN bits as a 0-15 integer (manual 4.19, the 'C' nibble)."""
+        return (self.get_ttl_port() >> 8) & 0x0F
+
+    def get_ttl_bit(self, bit: int) -> int:
+        """Read one TTL line with the ',?' form (manual 4.19).
+
+        TTL_OUT is addressed as bit 0-3 and TTL_IN as bit 8-11, the latter for backwards
+        compatibility with the H129.
+        """
+        if bit not in (0, 1, 2, 3, 8, 9, 10, 11):
+            msg = (
+                f"TTL bit must be 0-3 for TTL_OUT or 8-11 for TTL_IN (manual 4.19), "
+                f"got {bit!r}."
+            )
+            raise ValueError(msg)
+        response = self._query(f"TTL,{bit},?")
+        if response not in ("0", "1"):
+            msg = f"Invalid TTL,{bit},? response from the ProScan III: {response!r}."
+            raise RuntimeError(msg)
+        return int(response)
+
+    def set_ttl_output_bit(self, bit: int, level: int) -> None:
+        """Set one TTL_OUT line (manual 4.19, 'TTL n,m').
+
+        The level is never omitted. Manual 4.19: "it is important not to omit m or it will
+        be assumed by the controller that n is a Hexadecimal number" -- so 'TTL,2', which
+        reads like a query for bit 2, in fact writes 0x02 to the whole output nibble.
+        """
+        if bit not in (0, 1, 2, 3):
+            msg = f"Only TTL_OUT 0-3 can be written; TTL_IN is read-only. Got {bit!r}."
+            raise ValueError(msg)
+        if level not in (0, 1):
+            msg = f"TTL level must be 0 or 1, got {level!r}."
+            raise ValueError(msg)
+        self._command(f"TTL,{bit},{level}")
+
+    def set_ttl_output_bits(self, nibble: int) -> None:
+        """Set all four TTL_OUT lines at once (manual 4.19, the hex-write form)."""
+        if not 0 <= nibble <= 0x0F:
+            msg = f"The TTL output nibble must be 0-15, got {nibble!r}."
+            raise ValueError(msg)
+        self._command(f"TTL,{nibble:X}")
+
+    def get_latched_ttl_transitions(self) -> tuple[int, int]:
+        """Return (went high, went low) for TTL_IN 0-3 since the last call (manual 4.17).
+
+        'LTTL' latches, and reading CONSUMES what it reports, like the '=' limit latch.
+        It covers the input lines only, so it never sees a change the driver itself made
+        to an output.
+        """
+        response = self._query("LTTL")
+        parts = response.split(",")
+        if len(parts) != 2:
+            msg = f"Invalid LTTL response from the ProScan III: {response!r}."
+            raise RuntimeError(msg)
+        try:
+            return int(parts[0]), int(parts[1])
+        except ValueError as exc:
+            msg = f"Invalid LTTL response from the ProScan III: {response!r}."
+            raise RuntimeError(msg) from exc
+
+    @staticmethod
+    def decode_ttl_bits(nibble: int) -> str:
+        """Render a TTL nibble as 'bit3 bit2 bit1 bit0' for a report."""
+        return " ".join(str((nibble >> bit) & 1) for bit in (3, 2, 1, 0))
 
     def get_joystick_status_line(self) -> str:
         """Return the '?' line describing the joystick, e.g. 'JOYSTICK ACTIVE' (manual 4.2).

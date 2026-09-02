@@ -84,6 +84,14 @@ class ProScanIIISimulator:
         self.joystick_xy_enabled = True
         self.stall_forever = stall_forever
 
+        # TTL port, manual 4.19. The bench controller idles with TTL_OUT 2 high, so the
+        # default is 0x4 rather than 0 -- a driver that assumes the lines start low is
+        # then wrong against the one controller we have seen.
+        self.ttl_outputs = 0x4
+        self.ttl_inputs = 0x0
+        self.ttl_went_high = 0
+        self.ttl_went_low = 0
+
         # Injected fault: the axis lands this many user units away from the target.
         self.position_error_user_units = position_error_user_units
 
@@ -344,6 +352,76 @@ class ProScanIIISimulator:
         # Manual 4.2: decimal, and reading clears the latch.
         self.out.append(str(self.limit_latch))
         self.limit_latch = 0
+
+    # ------------------------------------------------------------- TTL port
+    #
+    # Manual 4.19. Modelled after the bench controller, firmware 1.03: the response is
+    # 'DCBA' with leading zeros omitted and in LOWERCASE hex, which is not the case LMT
+    # uses. A driver that compares these case-sensitively must fail here.
+
+    def _cmd_ttl(self, arguments: list[str]) -> None:
+        if not arguments:
+            value = (self.ttl_inputs << 8) | self.ttl_outputs
+            self.out.append(f"{value:x}")          # lowercase, leading zeros omitted
+            return
+
+        if len(arguments) == 1:
+            # Manual 4.19: a lone argument is a HEX WRITE of the output nibble, not a
+            # query. This is the trap the driver must never fall into by accident.
+            try:
+                self.ttl_outputs = int(arguments[0], 16) & 0x0F
+            except ValueError:
+                self._error(4)
+                return
+            self._ok()
+            return
+
+        bit_text, level_text = arguments[0], arguments[1]
+        try:
+            bit = int(bit_text)
+        except ValueError:
+            self._error(4)
+            return
+
+        if level_text == "?":
+            if bit in (0, 1, 2, 3):
+                self.out.append(str((self.ttl_outputs >> bit) & 1))
+            elif bit in (8, 9, 10, 11):
+                self.out.append(str((self.ttl_inputs >> (bit - 8)) & 1))
+            else:
+                self._error(10)                     # ARG1_OUT_OF_RANGE
+            return
+
+        if bit not in (0, 1, 2, 3):
+            # TTL_IN cannot be written.
+            self._error(10)
+            return
+        if level_text not in ("0", "1"):
+            self._error(4)
+            return
+        if level_text == "1":
+            self.ttl_outputs |= 1 << bit
+        else:
+            self.ttl_outputs &= ~(1 << bit) & 0x0F
+        self._ok()
+
+    def _cmd_lttl(self, arguments: list[str]) -> None:
+        # Manual 4.17: latched transitions of TTLIN0-3, and reading consumes them.
+        self.out.append(f"{self.ttl_went_high},{self.ttl_went_low}")
+        self.ttl_went_high = 0
+        self.ttl_went_low = 0
+
+    def set_ttl_input(self, bit: int, level: int) -> None:
+        """Test helper: drive a TTL input and latch the transition, as the hardware does."""
+        was = (self.ttl_inputs >> bit) & 1
+        if level and not was:
+            self.ttl_went_high |= 1 << bit
+        elif was and not level:
+            self.ttl_went_low |= 1 << bit
+        if level:
+            self.ttl_inputs |= 1 << bit
+        else:
+            self.ttl_inputs &= ~(1 << bit) & 0x0F
 
     def _cmd_lmt(self, arguments: list[str]) -> None:
         # Manual 4.2: two hexadecimal digits, of the switches currently in contact.

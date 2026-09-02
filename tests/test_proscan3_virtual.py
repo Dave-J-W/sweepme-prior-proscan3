@@ -392,8 +392,29 @@ def test_configured_settings(driver) -> None:
     check(not instrument.commands_matching("SMS"), "an empty speed field changes nothing")
     check(not instrument.commands_matching("SAS"), "an empty acceleration field changes nothing")
     check("H,1" in instrument.log, "the joystick is disabled during the run by default")
+
+    # The lockout is taken in initialize() and released in disconnect(), NOT in
+    # configure()/unconfigure(), so that it spans a whole multi-branch run instead of
+    # being released and retaken between branches.
     device.unconfigure()
-    check("J" in instrument.log, "unconfigure() re-enables the joystick")
+    check("J" not in instrument.log, "unconfigure() does NOT release the lockout")
+    device.disconnect()
+    check("J" in instrument.log, "disconnect() releases the lockout")
+
+    # A second configure/unconfigure cycle, as a second branch would do, must not touch
+    # the joystick at all.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    device.unconfigure()
+    device.configure()
+    device.unconfigure()
+    check(
+        instrument.commands_matching("H,1") == ["H,1"],
+        f"the lockout is taken exactly once across two branches, got "
+        f"{instrument.commands_matching('H,1')}",
+    )
+    check(not instrument.commands_matching("J"), "and is not released between branches")
+    device.disconnect()
 
     instrument = ProScanIIISimulator()
     device = bring_up(
@@ -402,15 +423,29 @@ def test_configured_settings(driver) -> None:
         **{
             "Speed (empty = unchanged)": "80",
             "Acceleration (empty = unchanged)": "60",
-            "Disable joystick during run": False,
+            "Disable Joystick during SweepMe Run": False,
         },
     )
     check("SMS,80" in instrument.log, "a requested speed is sent as SMS,80")
     check("SAS,60" in instrument.log, "a requested acceleration is sent as SAS,60")
     check("H,1" not in instrument.log, "the joystick is left alone when the box is unchecked")
-    device.unconfigure()
+    device.disconnect()
     check("J" not in instrument.log, "the joystick is not re-enabled if it was never disabled")
     check(instrument.out == [], "no unread responses are left in the port buffer")
+
+    # A sequence saved by an older driver carries the old field name; it must still work.
+    instrument = ProScanIIISimulator()
+    device = make_device(driver, instrument)
+    parameters = device.set_GUIparameter()
+    parameters = {k: (v[0] if isinstance(v, list) else v) for k, v in parameters.items()}
+    del parameters["Disable Joystick during SweepMe Run"]
+    parameters["Disable joystick during run"] = False
+    parameters["Port"] = "COM3"
+    device.get_GUIparameter(parameters)
+    check(
+        device.disable_joystick is False,
+        "the pre-rename field name is still honoured for old saved sequences",
+    )
 
 
 def test_error_decoding(driver) -> None:
@@ -644,11 +679,11 @@ def test_self_tests(driver) -> None:
 
     # --- tier 2, the joystick lockout round-trip
     #
-    # "Disable joystick during run: False" so that configure() does not itself take the
+    # "Disable Joystick during SweepMe Run: False" so that initialize() does not itself take
     # lockout. Otherwise the tier's own mid-run guard refuses, and a bare
     # "FAIL not in report" passes on the refusal without having tested anything.
     instrument = ProScanIIISimulator()
-    device = bring_up(driver, instrument, **{"Disable joystick during run": False})
+    device = bring_up(driver, instrument, **{"Disable Joystick during SweepMe Run": False})
     device.messages = []
     device.run_self_test_joystick()
     report = "\n".join(device.messages)
@@ -673,7 +708,7 @@ def test_self_tests(driver) -> None:
         def _cmd_h(self, arguments):
             self._ok()
 
-    device = bring_up(driver, IgnoresLockout(), **{"Disable joystick during run": False})
+    device = bring_up(driver, IgnoresLockout(), **{"Disable Joystick during SweepMe Run": False})
     device.messages = []
     device.run_self_test_joystick()
     report = "\n".join(device.messages)
@@ -682,7 +717,7 @@ def test_self_tests(driver) -> None:
     # --- the joystick tier refuses mid-run rather than unlocking the stage
     instrument = ProScanIIISimulator()
     device = bring_up(driver, instrument)          # configure() disabled the joystick
-    check(device.joystick_was_disabled, "configure() disabled the joystick for the run")
+    check(device.joystick_was_disabled, "initialize() disabled the joystick for the run")
     device.messages = []
     device.run_self_test_joystick()
     report = "\n".join(device.messages)
@@ -694,7 +729,7 @@ def test_self_tests(driver) -> None:
         def _cmd_info(self, arguments):
             self.out.extend(["PROSCAN INFORMATION", "JOYSTICK NOT FITTED", "END"])
 
-    device = make_device(driver, NoJoystick(), **{"Disable joystick during run": False})
+    device = make_device(driver, NoJoystick(), **{"Disable Joystick during SweepMe Run": False})
     device.connect()
     device.initialize()
     device.messages = []
@@ -778,6 +813,125 @@ def test_self_tests(driver) -> None:
         "and the test stops there rather than attempting the return leg",
     )
     check("re-index" in report, "and it says to re-index before trusting the position")
+
+
+def test_ttl_port(driver) -> None:
+    """The TTL port: reads, the guarded write forms, and the run bracket."""
+    print("\n[32] TTL port")
+
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+
+    # The bench controller idles with TTL_OUT 2 high, and answers in LOWERCASE hex while
+    # LMT answers uppercase. A case-sensitive parse passes one and fails the other.
+    check(device.get_ttl_output_bits() == 0x4, "the idle TTL_OUT nibble is read as 0x4")
+    check(device.get_ttl_input_bits() == 0x0, "the TTL_IN nibble is read as 0x0")
+    check(device.get_ttl_bit(2) == 1, "TTL,2,? reads TTL_OUT 2 as high")
+    check(device.get_ttl_bit(1) == 0, "TTL,1,? reads TTL_OUT 1 as low")
+    check(device.get_ttl_bit(10) == 0, "TTL,10,? reads TTL_IN 2, addressed as 8+n")
+
+    instrument.ttl_outputs = 0xF
+    check(device.get_ttl_output_bits() == 0xF, "an all-high nibble is read back as 0xF")
+    instrument.ttl_outputs = 0x4
+
+    # The write forms. The level is never omitted: manual 4.19 warns that 'TTL,2' is a
+    # HEX WRITE of 0x02, not a query of bit 2.
+    device.set_ttl_output_bit(1, 1)
+    check(instrument.ttl_outputs == 0x6, "set_ttl_output_bit(1, 1) sets only bit 1")
+    check("TTL,1,1" in instrument.log, "and sends the level explicitly, never a bare 'TTL,1'")
+    device.set_ttl_output_bit(1, 0)
+    check(instrument.ttl_outputs == 0x4, "set_ttl_output_bit(1, 0) clears it again")
+
+    device.set_ttl_output_bits(0xA)
+    check(instrument.ttl_outputs == 0xA, "set_ttl_output_bits(0xA) writes the whole nibble")
+    check("TTL,A" in instrument.log, "using the documented single-argument hex form")
+
+    for bit in (4, 7, 8, -1):
+        expect_error(
+            lambda b=bit: device.set_ttl_output_bit(b, 1),
+            f"writing TTL bit {bit} is refused; TTL_IN is read-only",
+        )
+    expect_error(
+        lambda: device.set_ttl_output_bit(0, 2),
+        "a TTL level other than 0 or 1 is refused",
+    )
+    expect_error(lambda: device.set_ttl_output_bits(0x10), "a TTL nibble above 0xF is refused")
+    expect_error(lambda: device.get_ttl_bit(5), "reading a nonexistent TTL bit is refused")
+
+    # LTTL latches input transitions and consumes them on read.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    instrument.set_ttl_input(3, 1)
+    instrument.set_ttl_input(0, 1)
+    instrument.set_ttl_input(0, 0)
+    went_high, went_low = device.get_latched_ttl_transitions()
+    check(went_high == 0b1001, f"LTTL reports both rising edges, got 0b{went_high:04b}")
+    check(went_low == 0b0001, f"LTTL reports the falling edge, got 0b{went_low:04b}")
+    check(
+        device.get_latched_ttl_transitions() == (0, 0),
+        "and reading LTTL consumed the latch, like the '=' limit latch",
+    )
+
+    # The GUI field: empty must leave the lines completely alone.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    check(
+        not [c for c in instrument.log if c.upper().startswith("TTL,")],
+        "an empty TTL field writes nothing at all",
+    )
+    check(instrument.ttl_outputs == 0x4, "and leaves the outputs as found")
+
+    # A requested pattern is applied in configure() and put back in unconfigure().
+    instrument = ProScanIIISimulator()
+    device = bring_up(
+        driver, instrument,
+        **{"TTL outputs at start of run (hex 0-F, empty = unchanged)": "9"},
+    )
+    check(instrument.ttl_outputs == 0x9, "a requested TTL pattern is applied for the run")
+    device.unconfigure()
+    check(
+        instrument.ttl_outputs == 0x4,
+        f"and the pre-run state is restored, not zeroed (got 0x{instrument.ttl_outputs:X})",
+    )
+
+    # Restoring can be turned off, for a pattern meant to outlive the run.
+    instrument = ProScanIIISimulator()
+    device = bring_up(
+        driver, instrument,
+        **{
+            "TTL outputs at start of run (hex 0-F, empty = unchanged)": "9",
+            "Restore TTL outputs at end of run": False,
+        },
+    )
+    device.unconfigure()
+    check(instrument.ttl_outputs == 0x9, "with restore off, the pattern outlives the run")
+
+    # A bad GUI entry is rejected when it is typed, not sent to the controller.
+    for bad in ("G", "10", "-1", "zz"):
+        expect_error(
+            lambda b=bad: make_device(
+                driver, ProScanIIISimulator(),
+                **{"TTL outputs at start of run (hex 0-F, empty = unchanged)": b},
+            ),
+            f"the TTL field rejects {bad!r} before anything is sent",
+        )
+
+    # The read-only action.
+    instrument = ProScanIIISimulator()
+    device = bring_up(driver, instrument)
+    before = len(instrument.log)
+    device.messages = []
+    device.report_ttl()
+    report = "\n".join(device.messages)
+    check("TTL_OUT 3..0: 0 1 0 0" in report, "report_ttl() decodes the output bits")
+    check("TTL_IN  3..0: 0 0 0 0" in report, "report_ttl() decodes the input bits")
+    check("LTTL" in report, "report_ttl() reports the input latch")
+    written = [
+        command
+        for command in instrument.log[before:]
+        if command.upper().startswith("TTL,") and not command.endswith(",?")
+    ]
+    check(not written, f"report_ttl() writes nothing, sent {written}")
 
 
 def test_interface_declaration(driver) -> None:
@@ -1308,6 +1462,7 @@ def main() -> int:
         test_configuration_restore_order,
         test_configuration_action_never_raises,
         test_self_tests,
+        test_ttl_port,
     ):
         test(driver)
 
